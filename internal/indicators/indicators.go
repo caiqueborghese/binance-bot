@@ -1,4 +1,3 @@
-// internal/indicators/indicators.go
 package indicators
 
 import (
@@ -40,14 +39,12 @@ func ComputeEMA(prices []float64, period int) []float64 {
 	}
 
 	mult := 2.0 / float64(period+1)
-	// Inicializa SMA para o primeiro valor de EMA
 	sum := 0.0
 	for i := 0; i < period; i++ {
 		sum += prices[i]
 	}
 	ema[period-1] = sum / float64(period)
 
-	// Calcula EMA subsequente
 	for i := period; i < len(prices); i++ {
 		ema[i] = (prices[i]-ema[i-1])*mult + ema[i-1]
 	}
@@ -65,7 +62,6 @@ func ComputeMACD(prices []float64, fastPeriod, slowPeriod, signalPeriod int) (ma
 		macdLine[i] = fastEMA[i] - slowEMA[i]
 	}
 
-	// Sinal é EMA da linha MACD
 	signalLine = ComputeEMA(macdLine, signalPeriod)
 
 	histogram = make([]float64, length)
@@ -94,7 +90,6 @@ func ComputeRSI(prices []float64, period int) []float64 {
 		}
 	}
 
-	// Média inicial de ganhos e perdas
 	sumGain, sumLoss := 0.0, 0.0
 	for i := 1; i <= period; i++ {
 		sumGain += gains[i]
@@ -103,7 +98,6 @@ func ComputeRSI(prices []float64, period int) []float64 {
 	rs := sumGain / sumLoss
 	rsi[period] = 100 - (100 / (1 + rs))
 
-	// RSI iterativo
 	for i := period + 1; i < len(prices); i++ {
 		sumGain = (sumGain*float64(period-1) + gains[i]) / float64(period)
 		sumLoss = (sumLoss*float64(period-1) + losses[i]) / float64(period)
@@ -131,6 +125,26 @@ func ComputeVolumeMA(volumes []float64, period int) []float64 {
 		sum += volumes[i] - volumes[i-period]
 		ma[i] = sum / float64(period)
 	}
-
 	return ma
+}
+
+// --- NOVAS FUNÇÕES AUXILIARES ---
+
+// Último valor do MACD
+func LastMACD(prices []float64, fast, slow, signal int) (macd, signalLine, hist float64) {
+	m, s, h := ComputeMACD(prices, fast, slow, signal)
+	last := len(prices) - 1
+	return m[last], s[last], h[last]
+}
+
+// Último valor do RSI
+func LastRSI(prices []float64, period int) float64 {
+	r := ComputeRSI(prices, period)
+	return r[len(prices)-1]
+}
+
+// Último valor da média de volume
+func LastVolumeMA(vols []float64, period int) float64 {
+	v := ComputeVolumeMA(vols, period)
+	return v[len(vols)-1]
 }
