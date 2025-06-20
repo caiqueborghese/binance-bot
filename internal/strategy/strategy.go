@@ -14,21 +14,35 @@ const (
 	SellSignal
 )
 
-// EvaluateSignal applies the hyper-scalping grid martingale strategy
-// Returns BuySignal, SellSignal or NoSignal for the last candle
+// EvaluateSignal aplica uma estratégia combinando MACD, RSI e Volume MA
 func EvaluateSignal(klines [][]interface{}) Signal {
-	// Extract prices
 	closes := indicators.ExtractClosePrices(klines)
+	volumes := indicators.ExtractVolumes(klines)
+
+	// Parâmetros fixos
+	fastPeriod := 12
+	slowPeriod := 26
+	signalPeriod := 9
+	rsiPeriod := 14
+	volumeMAPeriod := 20
+
+	// Calcula os indicadores
+	macd, _, _ := indicators.ComputeMACD(closes, fastPeriod, slowPeriod, signalPeriod)
+	rsi := indicators.ComputeRSI(closes, rsiPeriod)
+	volMA := indicators.ComputeVolumeMA(volumes, volumeMAPeriod)
 
 	last := len(closes) - 1
+	if last < slowPeriod || last < rsiPeriod || last < volumeMAPeriod {
+		return NoSignal
+	}
 
-	// Buy if price increased
-	if closes[last] > closes[last-1] {
+	// Critérios para COMPRA
+	if macd[last] > 0 && rsi[last] > 50 && volumes[last] > volMA[last] {
 		return BuySignal
 	}
 
-	// Sell if price decreased
-	if closes[last] < closes[last-1] {
+	// Critérios para VENDA
+	if macd[last] < 0 && rsi[last] < 50 && volumes[last] > volMA[last] {
 		return SellSignal
 	}
 
