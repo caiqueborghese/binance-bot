@@ -2,6 +2,9 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,10 +23,16 @@ import (
 	"binance-bot/internal/telegram"
 )
 
+func sign(data, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(data))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, error) {
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params := "timestamp=" + timestamp
-	signature := binance.Sign(params, apiSecret)
+	signature := sign(params, apiSecret)
 	url := fmt.Sprintf("https://fapi.binance.com/fapi/v2/positionRisk?%s&signature=%s", params, signature)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -76,7 +85,6 @@ func main() {
 	symbol := "XRPUSDT"
 	leverage := 20.0
 	inPosition := false
-	entryPrice := 0.0
 
 	for {
 		saldo := client.GetUSDTBalance()
@@ -84,6 +92,11 @@ func main() {
 
 		klines := client.GetKlines(symbol, "1m", 100)
 		closes := indicators.ExtractClosePrices(klines)
+		volumes := indicators.ExtractVolumes(klines)
+		macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
+		rsi := indicators.ComputeRSI(closes, 14)
+		volMA := indicators.ComputeVolumeMA(volumes, 14)
+
 		price := closes[len(closes)-1]
 		sig := strategy.EvaluateSignal(klines)
 
@@ -96,7 +109,7 @@ func main() {
 			if pnl >= 3.0 {
 				msg := fmt.Sprintf("🎯 TAKE PROFIT atingido (+%.2f%%)! Fechando posição.", pnl)
 				fmt.Println(msg)
-				client.PlaceMarketOrder(symbol, "BUY", 100) // ajuste real
+				client.PlaceMarketOrder(symbol, "BUY", 100)
 				telegram.SendMessage(msg)
 				logger.LogTrade(symbol, "TP-CLOSE", 100, price, saldo)
 				inPosition = false
@@ -129,8 +142,21 @@ func main() {
 			ok := client.PlaceMarketOrder(symbol, "BUY", qty)
 			if ok {
 				inPosition = true
-				entryPrice = price
-				telegram.SendMessage(msg)
+				msgDet := fmt.Sprintf(
+					"%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs Média: %.2f\n\n💰 Preço de entrada: %.4f\n🔁 Quantidade: %.1f\n⚙️ Alavancagem: %.0fx\n💼 Saldo USDT: %.2f\n\n⏱ Intervalo: 1m | Ativo: %s",
+					msg,
+					macdLine[len(macdLine)-1],
+					signalLine[len(signalLine)-1],
+					rsi[len(rsi)-1],
+					volumes[len(volumes)-1],
+					volMA[len(volMA)-1],
+					price,
+					qty,
+					leverage,
+					saldo,
+					symbol,
+				)
+				telegram.SendMessage(msgDet)
 				logger.LogTrade(symbol, "BUY", qty, price, saldo)
 			} else {
 				fmt.Println("❌ Erro ao executar ordem de compra!")
@@ -142,8 +168,21 @@ func main() {
 			ok := client.PlaceMarketOrder(symbol, "SELL", qty)
 			if ok {
 				inPosition = true
-				entryPrice = price
-				telegram.SendMessage(msg)
+				msgDet := fmt.Sprintf(
+					"%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs Média: %.2f\n\n💰 Preço de entrada: %.4f\n🔁 Quantidade: %.1f\n⚙️ Alavancagem: %.0fx\n💼 Saldo USDT: %.2f\n\n⏱ Intervalo: 1m | Ativo: %s",
+					msg,
+					macdLine[len(macdLine)-1],
+					signalLine[len(signalLine)-1],
+					rsi[len(rsi)-1],
+					volumes[len(volumes)-1],
+					volMA[len(volMA)-1],
+					price,
+					qty,
+					leverage,
+					saldo,
+					symbol,
+				)
+				telegram.SendMessage(msgDet)
 				logger.LogTrade(symbol, "SELL", qty, price, saldo)
 			} else {
 				fmt.Println("❌ Erro ao executar ordem de venda!")
