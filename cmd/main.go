@@ -40,11 +40,7 @@ func main() {
 	leverage := 20.0
 	inPosition := false
 	entryPrice := 0.0
-	qty := 0.0
-	trailingActive := false
-	positionSide := ""
-	trailingStartGain := 1.5
-	trailingStopTrigger := 0.5
+	positionSide := "" // BUY ou SELL
 
 	for {
 		saldo := client.GetUSDTBalance()
@@ -56,44 +52,35 @@ func main() {
 		sig := strategy.EvaluateSignal(klines)
 
 		if inPosition {
-			gain := 0.0
+			var gain float64
 			if positionSide == "BUY" {
 				gain = (price - entryPrice) / entryPrice * 100 * leverage
-			} else {
+			} else if positionSide == "SELL" {
 				gain = (entryPrice - price) / entryPrice * 100 * leverage
 			}
 
-			if trailingActive && gain <= trailingStopTrigger {
-				msg := fmt.Sprintf("🔻 Trailing Stop acionado (%.2f%%) — Fechando posição.", gain)
+			if gain >= 3.0 {
+				msg := fmt.Sprintf("🎯 TAKE PROFIT atingido (+%.2f%%)! Fechando posição.", gain)
 				fmt.Println(msg)
-				client.PlaceMarketOrder(symbol, "SELL", qty)
-				telegram.SendMessage(msg)
-				logger.LogTrade(symbol, "TRAIL-CLOSE", qty, price, saldo)
-				inPosition = false
-				trailingActive = false
-			} else if gain >= 2.0 {
-				msg := fmt.Sprintf("🎯 TAKE PROFIT atingido (%.2f%%)! Fechando posição.", gain)
-				fmt.Println(msg)
-				client.PlaceMarketOrder(symbol, "SELL", qty)
-				telegram.SendMessage(msg)
-				logger.LogTrade(symbol, "TP-CLOSE", qty, price, saldo)
-				inPosition = false
-				trailingActive = false
-			} else if gain <= -3.0 {
+				ok := client.PlaceMarketOrder(symbol, "SELL", 100)
+				if ok {
+					telegram.SendMessage(msg)
+					logger.LogTrade(symbol, "TP-CLOSE", 100, price, saldo)
+					inPosition = false
+				}
+			} else if gain <= -1.0 {
 				msg := fmt.Sprintf("⚠️ STOP LOSS ativado (%.2f%%)! Fechando posição.", gain)
 				fmt.Println(msg)
-				client.PlaceMarketOrder(symbol, "SELL", qty)
-				telegram.SendMessage(msg)
-				logger.LogTrade(symbol, "SL-CLOSE", qty, price, saldo)
-				inPosition = false
-				trailingActive = false
-			} else {
-				fmt.Printf("📊 Em posição %s - Variação atual: %.2f%%\n", positionSide, gain)
-				if gain >= trailingStartGain {
-					trailingActive = true
-					fmt.Println("🔁 Trailing stop ativado!")
+				ok := client.PlaceMarketOrder(symbol, "SELL", 100)
+				if ok {
+					telegram.SendMessage(msg)
+					logger.LogTrade(symbol, "SL-CLOSE", 100, price, saldo)
+					inPosition = false
 				}
+			} else {
+				fmt.Printf("📊 Em posição - Variação atual: %.2f%%\n", gain)
 			}
+
 			time.Sleep(60 * time.Second)
 			continue
 		}
@@ -104,7 +91,7 @@ func main() {
 			time.Sleep(60 * time.Second)
 			continue
 		}
-		qty, _ = strconv.ParseFloat(fmt.Sprintf("%.3f", rawQty), 64)
+		qty, _ := strconv.ParseFloat(fmt.Sprintf("%.1f", rawQty), 64)
 
 		switch sig {
 		case strategy.BuySignal:
