@@ -2,8 +2,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
@@ -17,6 +19,41 @@ import (
 	"binance-bot/internal/strategy"
 	"binance-bot/internal/telegram"
 )
+
+func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, error) {
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	params := "timestamp=" + timestamp
+	signature := binance.Sign(params, apiSecret)
+	url := fmt.Sprintf("https://fapi.binance.com/fapi/v2/positionRisk?%s&signature=%s", params, signature)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("X-MBX-APIKEY", apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var data []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return 0, err
+	}
+
+	for _, item := range data {
+		if item["symbol"] == symbol {
+			unrealized, _ := strconv.ParseFloat(item["unRealizedProfit"].(string), 64)
+			notional, _ := strconv.ParseFloat(item["notional"].(string), 64)
+			if notional == 0 {
+				return 0, nil
+			}
+			return (unrealized / notional) * 100, nil
+		}
+	}
+	return 0, nil
+}
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -40,7 +77,6 @@ func main() {
 	leverage := 20.0
 	inPosition := false
 	entryPrice := 0.0
-	positionSide := "" // BUY ou SELL
 
 	for {
 		saldo := client.GetUSDTBalance()
@@ -51,36 +87,29 @@ func main() {
 		price := closes[len(closes)-1]
 		sig := strategy.EvaluateSignal(klines)
 
+		pnl, err := fetchPositionPNL(apiKey, apiSecret, symbol)
+		if err != nil {
+			log.Printf("Erro ao buscar PNL: %v\n", err)
+		}
+
 		if inPosition {
-			var gain float64
-			if positionSide == "BUY" {
-				gain = (price - entryPrice) / entryPrice * 100 * leverage
-			} else if positionSide == "SELL" {
-				gain = (entryPrice - price) / entryPrice * 100 * leverage
-			}
-
-			if gain >= 3.0 {
-				msg := fmt.Sprintf("🎯 TAKE PROFIT atingido (+%.2f%%)! Fechando posição.", gain)
+			if pnl >= 3.0 {
+				msg := fmt.Sprintf("🎯 TAKE PROFIT atingido (+%.2f%%)! Fechando posição.", pnl)
 				fmt.Println(msg)
-				ok := client.PlaceMarketOrder(symbol, "SELL", 100)
-				if ok {
-					telegram.SendMessage(msg)
-					logger.LogTrade(symbol, "TP-CLOSE", 100, price, saldo)
-					inPosition = false
-				}
-			} else if gain <= -1.0 {
-				msg := fmt.Sprintf("⚠️ STOP LOSS ativado (%.2f%%)! Fechando posição.", gain)
+				client.PlaceMarketOrder(symbol, "BUY", 100) // ajuste real
+				telegram.SendMessage(msg)
+				logger.LogTrade(symbol, "TP-CLOSE", 100, price, saldo)
+				inPosition = false
+			} else if pnl <= -1.0 {
+				msg := fmt.Sprintf("⚠️ STOP LOSS ativado (%.2f%%)! Fechando posição.", pnl)
 				fmt.Println(msg)
-				ok := client.PlaceMarketOrder(symbol, "SELL", 100)
-				if ok {
-					telegram.SendMessage(msg)
-					logger.LogTrade(symbol, "SL-CLOSE", 100, price, saldo)
-					inPosition = false
-				}
+				client.PlaceMarketOrder(symbol, "BUY", 100)
+				telegram.SendMessage(msg)
+				logger.LogTrade(symbol, "SL-CLOSE", 100, price, saldo)
+				inPosition = false
 			} else {
-				fmt.Printf("📊 Em posição - Variação atual: %.2f%%\n", gain)
+				fmt.Printf("📊 Em posição - Variação atual: %.2f%%\n", pnl)
 			}
-
 			time.Sleep(60 * time.Second)
 			continue
 		}
@@ -101,7 +130,6 @@ func main() {
 			if ok {
 				inPosition = true
 				entryPrice = price
-				positionSide = "BUY"
 				telegram.SendMessage(msg)
 				logger.LogTrade(symbol, "BUY", qty, price, saldo)
 			} else {
@@ -115,7 +143,6 @@ func main() {
 			if ok {
 				inPosition = true
 				entryPrice = price
-				positionSide = "SELL"
 				telegram.SendMessage(msg)
 				logger.LogTrade(symbol, "SELL", qty, price, saldo)
 			} else {
