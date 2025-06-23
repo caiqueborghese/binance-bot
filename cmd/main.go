@@ -20,7 +20,7 @@ import (
 	"binance-bot/internal/telegram"
 )
 
-func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, error) {
+func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, float64, float64, error) {
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params := "timestamp=" + timestamp
 	signature := binance.Sign(params, apiSecret)
@@ -28,18 +28,19 @@ func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, error) {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	req.Header.Set("X-MBX-APIKEY", apiKey)
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	defer resp.Body.Close()
 
 	var data []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 
 	for _, item := range data {
@@ -48,20 +49,22 @@ func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, error) {
 			markPrice, _ := strconv.ParseFloat(item["markPrice"].(string), 64)
 			positionAmt, _ := strconv.ParseFloat(item["positionAmt"].(string), 64)
 
-			if entryPrice == 0 || positionAmt == 0 {
-				return 0, nil
+			if positionAmt == 0 {
+				return 0, 0, 0, nil
 			}
 
-			pnl := ((markPrice - entryPrice) / entryPrice) * 100
-			if positionAmt < 0 {
-				pnl = ((entryPrice - markPrice) / entryPrice) * 100
+			var pnlPercent float64
+			if positionAmt > 0 {
+				pnlPercent = ((markPrice - entryPrice) / entryPrice) * 100
+			} else {
+				pnlPercent = ((entryPrice - markPrice) / entryPrice) * 100
 			}
 
-			log.Printf("📈 Verificando PnL: %.2f%% | Entry: %.4f | Mark: %.4f | Pos: %.2f", pnl, entryPrice, markPrice, positionAmt)
-			return pnl, nil
+			return pnlPercent, entryPrice, markPrice, nil
 		}
 	}
-	return 0, nil
+
+	return 0, 0, 0, fmt.Errorf("posição não encontrada para %s", symbol)
 }
 
 func main() {
@@ -100,10 +103,11 @@ func main() {
 		price := closes[len(closes)-1]
 		sig := strategy.EvaluateSignal(klines)
 
-		pnl, err := fetchPositionPNL(apiKey, apiSecret, symbol)
+		pnl, entry, mark, err := fetchPositionPNL(apiKey, apiSecret, symbol)
 		if err != nil {
 			log.Printf("Erro ao buscar PNL: %v\n", err)
 		}
+		fmt.Printf("📈 Verificando PnL: %.2f%% | Lucro: %.4f | Notional: %.2f\n", pnl, mark-entry, mark*leverage)
 
 		if inPosition {
 			if pnl >= 3.0 {
