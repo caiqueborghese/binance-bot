@@ -20,7 +20,7 @@ import (
 	"binance-bot/internal/telegram"
 )
 
-func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, float64, float64, error) {
+func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, error) {
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params := "timestamp=" + timestamp
 	signature := binance.Sign(params, apiSecret)
@@ -28,32 +28,40 @@ func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, float64, float
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, err
 	}
 	req.Header.Set("X-MBX-APIKEY", apiKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
 	var data []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return 0, 0, 0, err
+		return 0, err
 	}
 
 	for _, item := range data {
 		if item["symbol"] == symbol {
-			unrealized, _ := strconv.ParseFloat(item["unRealizedProfit"].(string), 64)
-			notional, _ := strconv.ParseFloat(item["notional"].(string), 64)
-			if notional == 0 {
-				return 0, unrealized, notional, nil
+			entryPrice, _ := strconv.ParseFloat(item["entryPrice"].(string), 64)
+			markPrice, _ := strconv.ParseFloat(item["markPrice"].(string), 64)
+			positionAmt, _ := strconv.ParseFloat(item["positionAmt"].(string), 64)
+
+			if entryPrice == 0 || positionAmt == 0 {
+				return 0, nil
 			}
-			pnl := (unrealized / notional) * 100
-			return pnl, unrealized, notional, nil
+
+			pnl := ((markPrice - entryPrice) / entryPrice) * 100
+			if positionAmt < 0 {
+				pnl = ((entryPrice - markPrice) / entryPrice) * 100
+			}
+
+			log.Printf("📈 Verificando PnL: %.2f%% | Entry: %.4f | Mark: %.4f | Pos: %.2f", pnl, entryPrice, markPrice, positionAmt)
+			return pnl, nil
 		}
 	}
-	return 0, 0, 0, nil
+	return 0, nil
 }
 
 func main() {
@@ -77,7 +85,6 @@ func main() {
 	symbol := "XRPUSDT"
 	leverage := 20.0
 	inPosition := false
-	lastSide := ""
 
 	for {
 		saldo := client.GetUSDTBalance()
@@ -93,31 +100,23 @@ func main() {
 		price := closes[len(closes)-1]
 		sig := strategy.EvaluateSignal(klines)
 
-		pnl, unrealized, notional, err := fetchPositionPNL(apiKey, apiSecret, symbol)
+		pnl, err := fetchPositionPNL(apiKey, apiSecret, symbol)
 		if err != nil {
 			log.Printf("Erro ao buscar PNL: %v\n", err)
 		}
-		fmt.Printf("📈 Verificando PnL: %.2f%% | Lucro: %.4f | Notional: %.2f\n", pnl, unrealized, notional)
 
 		if inPosition {
-			var closeSide string
-			if lastSide == "BUY" {
-				closeSide = "SELL"
-			} else {
-				closeSide = "BUY"
-			}
-
 			if pnl >= 3.0 {
 				msg := fmt.Sprintf("🎯 TAKE PROFIT atingido (+%.2f%%)! Fechando posição.", pnl)
 				fmt.Println(msg)
-				client.PlaceMarketOrder(symbol, closeSide, 100)
+				client.PlaceMarketOrder(symbol, "BUY", 100)
 				telegram.SendMessage(msg)
 				logger.LogTrade(symbol, "TP-CLOSE", 100, price, saldo)
 				inPosition = false
 			} else if pnl <= -1.0 {
 				msg := fmt.Sprintf("⚠️ STOP LOSS ativado (%.2f%%)! Fechando posição.", pnl)
 				fmt.Println(msg)
-				client.PlaceMarketOrder(symbol, closeSide, 100)
+				client.PlaceMarketOrder(symbol, "BUY", 100)
 				telegram.SendMessage(msg)
 				logger.LogTrade(symbol, "SL-CLOSE", 100, price, saldo)
 				inPosition = false
@@ -143,7 +142,6 @@ func main() {
 			ok := client.PlaceMarketOrder(symbol, "BUY", qty)
 			if ok {
 				inPosition = true
-				lastSide = "BUY"
 				msgDet := fmt.Sprintf(
 					"%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs Média: %.2f\n\n💰 Preço de entrada: %.4f\n🔁 Quantidade: %.1f\n⚙️ Alavancagem: %.0fx\n💼 Saldo USDT: %.2f\n\n⏱ Intervalo: 1m | Ativo: %s",
 					msg,
@@ -170,7 +168,6 @@ func main() {
 			ok := client.PlaceMarketOrder(symbol, "SELL", qty)
 			if ok {
 				inPosition = true
-				lastSide = "SELL"
 				msgDet := fmt.Sprintf(
 					"%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs Média: %.2f\n\n💰 Preço de entrada: %.4f\n🔁 Quantidade: %.1f\n⚙️ Alavancagem: %.0fx\n💼 Saldo USDT: %.2f\n\n⏱ Intervalo: 1m | Ativo: %s",
 					msg,
