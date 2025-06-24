@@ -1,4 +1,3 @@
-// main.go atualizado com lógica de PnL precisa e controle de posições
 package main
 
 import (
@@ -22,7 +21,6 @@ import (
 )
 
 func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, float64, string, float64, float64, error) {
-	// 1. Obtem o preço de marca (Mark Price)
 	markPriceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
 	resp, err := http.Get(markPriceURL)
 	if err != nil {
@@ -37,7 +35,6 @@ func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, 
 	}
 	markPrice, _ := strconv.ParseFloat(markData.MarkPrice, 64)
 
-	// 2. Obtem os dados da posição
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params := "timestamp=" + timestamp
 	signature := binance.Sign(params, apiSecret)
@@ -67,7 +64,6 @@ func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, 
 			}
 			entry, _ := strconv.ParseFloat(item["entryPrice"].(string), 64)
 
-			// 3. Cálculo do PnL com alavancagem
 			var pnl float64
 			if posAmt > 0 {
 				pnl = (markPrice - entry) / entry * leverage * 100
@@ -127,7 +123,9 @@ func main() {
 		saldo := client.GetUSDTBalance()
 		fmt.Printf("\n💰 Saldo USDT: %.2f\n", saldo)
 
-		klines := client.GetKlines(symbol, "1m", 100)
+		rawKlines := client.GetKlines(symbol, "1m", 100)
+		klines := indicators.ConvertToKlines(rawKlines)
+
 		closes := indicators.ExtractClosePrices(klines)
 		volumes := indicators.ExtractVolumes(klines)
 		macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
@@ -213,7 +211,7 @@ func main() {
 				signalLine[len(signalLine)-1],
 				rsi[len(rsi)-1],
 				volumes[len(volumes)-1],
-				volMA[len(volMA)-1],
+				volMA,
 				currentPrice,
 				orderQty,
 				saldo,
