@@ -140,7 +140,7 @@ func main() {
 		inPosition, qty, side, entryPrice, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
 		if err != nil {
 			log.Printf("Erro ao buscar posição: %v\n", err)
-			time.Sleep(10 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
@@ -157,7 +157,7 @@ func main() {
 
 				if qty < stepSize {
 					log.Printf("❌ Quantidade abaixo do mínimo (%s): %.4f < %.4f", symbol, qty, stepSize)
-					time.Sleep(10 * time.Second)
+					time.Sleep(2 * time.Second)
 					continue
 				}
 
@@ -176,17 +176,17 @@ func main() {
 				} else {
 					fmt.Println("❌ Erro ao fechar posição!")
 				}
-				time.Sleep(10 * time.Second)
+				time.Sleep(2 * time.Second)
 				continue
 			}
-			time.Sleep(10 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
 		rawQty := saldo * 0.90 * leverage / currentPrice
 		if rawQty < stepSize {
 			log.Printf("❌ Quantidade insuficiente para %s (min: %.4f)", symbol, stepSize)
-			time.Sleep(30 * time.Second)
+			time.Sleep(3 * time.Second)
 			continue
 		}
 		orderQty := math.Floor(rawQty/stepSize) * stepSize
@@ -198,7 +198,7 @@ func main() {
 			side = "SELL"
 		default:
 			fmt.Println("⚪ Nenhum sinal — aguardando próximo candle...")
-			time.Sleep(10 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
@@ -224,6 +224,6 @@ func main() {
 			fmt.Println("❌ Erro ao executar ordem!")
 		}
 
-		time.Sleep(10 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 }
