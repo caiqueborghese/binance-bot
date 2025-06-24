@@ -149,7 +149,7 @@ func main() {
 		if inPosition {
 			fmt.Printf("📈 Em posição: %s | Qty: %.2f | Entrada: %.4f | PnL: %.2f%%\n", side, qty, entryPrice, pnl)
 
-			if pnl >= 3.0 || pnl <= -1.0 {
+			if pnl >= 1.0 || pnl <= -1.0 {
 				motivo := "TAKE PROFIT"
 				if pnl <= -1.0 {
 					motivo = "STOP LOSS"

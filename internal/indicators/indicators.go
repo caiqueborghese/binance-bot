@@ -148,3 +148,44 @@ func LastVolumeMA(vols []float64, period int) float64 {
 	v := ComputeVolumeMA(vols, period)
 	return v[len(vols)-1]
 }
+
+// Extrai os preços de abertura
+func ExtractOpenPrices(klines [][]interface{}) []float64 {
+	opens := make([]float64, len(klines))
+	for i, k := range klines {
+		if s, ok := k[1].(string); ok {
+			val, _ := strconv.ParseFloat(s, 64)
+			opens[i] = val
+		}
+	}
+	return opens
+}
+
+// Verifica se a última vela está em tamanho razoável
+func IsCandleReasonable(klines [][]interface{}, lookback int, maxFactor float64) bool {
+	if len(klines) < lookback+1 {
+		return true
+	}
+
+	last := len(klines) - 1
+	var sum float64
+	for i := last - lookback; i < last; i++ {
+		high := parseStrToFloat(klines[i][2])
+		low := parseStrToFloat(klines[i][3])
+		sum += high - low
+	}
+	avgRange := sum / float64(lookback)
+
+	// Faixa da última vela
+	hlLast := parseStrToFloat(klines[last][2]) - parseStrToFloat(klines[last][3])
+
+	return hlLast <= avgRange*maxFactor
+}
+
+func parseStrToFloat(val interface{}) float64 {
+	if s, ok := val.(string); ok {
+		f, _ := strconv.ParseFloat(s, 64)
+		return f
+	}
+	return 0
+}
