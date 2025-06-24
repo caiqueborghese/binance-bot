@@ -1,191 +1,120 @@
 package indicators
 
 import (
+	"binance-bot/internal/types"
+	"fmt"
+	"math"
 	"strconv"
 )
 
-// ExtractClosePrices converte um slice de klines ([[openTime, open, high, low, close, volume, ...]])
-// em um slice de preços de fechamento.
-func ExtractClosePrices(klines [][]interface{}) []float64 {
-	closes := make([]float64, len(klines))
+// Conversor de [][]interface{} para []types.Kline
+func ConvertToKlines(data [][]interface{}) []types.Kline {
+	var klines []types.Kline
+	for _, k := range data {
+		openTime, _ := k[0].(float64)
+		open, _ := strconv.ParseFloat(fmt.Sprintf("%v", k[1]), 64)
+		high, _ := strconv.ParseFloat(fmt.Sprintf("%v", k[2]), 64)
+		low, _ := strconv.ParseFloat(fmt.Sprintf("%v", k[3]), 64)
+		closePrice, _ := strconv.ParseFloat(fmt.Sprintf("%v", k[4]), 64)
+		volume, _ := strconv.ParseFloat(fmt.Sprintf("%v", k[5]), 64)
+		closeTime, _ := k[6].(float64)
+
+		klines = append(klines, types.Kline{
+			OpenTime:  int64(openTime),
+			Open:      open,
+			High:      high,
+			Low:       low,
+			Close:     closePrice,
+			Volume:    volume,
+			CloseTime: int64(closeTime),
+		})
+	}
+	return klines
+}
+
+func ExtractClosePrices(klines []types.Kline) []float64 {
+	prices := make([]float64, len(klines))
 	for i, k := range klines {
-		// k[4] é fechamento como string
-		if s, ok := k[4].(string); ok {
-			val, _ := strconv.ParseFloat(s, 64)
-			closes[i] = val
-		}
+		prices[i] = k.Close
 	}
-	return closes
+	return prices
 }
 
-// ExtractVolumes converte um slice de klines em um slice de volumes.
-func ExtractVolumes(klines [][]interface{}) []float64 {
-	vols := make([]float64, len(klines))
+func ExtractVolumes(klines []types.Kline) []float64 {
+	volumes := make([]float64, len(klines))
 	for i, k := range klines {
-		// k[5] é volume como string
-		if s, ok := k[5].(string); ok {
-			val, _ := strconv.ParseFloat(s, 64)
-			vols[i] = val
+		volumes[i] = k.Volume
+	}
+	return volumes
+}
+
+func ComputeRSI(closes []float64, period int) []float64 {
+	var rsi []float64
+	for i := period; i < len(closes); i++ {
+		var gain, loss float64
+		for j := i - period + 1; j <= i; j++ {
+			diff := closes[j] - closes[j-1]
+			if diff >= 0 {
+				gain += diff
+			} else {
+				loss -= diff
+			}
 		}
+		avgGain := gain / float64(period)
+		avgLoss := loss / float64(period)
+		rs := avgGain / (avgLoss + 1e-10)
+		rsi = append(rsi, 100-(100/(1+rs)))
 	}
-	return vols
+	return rsi
 }
 
-// ComputeEMA calcula a Média Móvel Exponencial para um slice de preços e período dado.
-func ComputeEMA(prices []float64, period int) []float64 {
-	ema := make([]float64, len(prices))
-	if period <= 0 || len(prices) < period {
-		return ema
+func ComputeMACD(closes []float64, shortPeriod, longPeriod, signalPeriod int) ([]float64, []float64, []float64) {
+	shortEMA := computeEMA(closes, shortPeriod)
+	longEMA := computeEMA(closes, longPeriod)
+
+	minLen := int(math.Min(float64(len(shortEMA)), float64(len(longEMA))))
+	macdLine := make([]float64, minLen)
+	for i := 0; i < minLen; i++ {
+		macdLine[i] = shortEMA[i] - longEMA[i]
 	}
 
-	mult := 2.0 / float64(period+1)
-	sum := 0.0
-	for i := 0; i < period; i++ {
-		sum += prices[i]
-	}
-	ema[period-1] = sum / float64(period)
-
-	for i := period; i < len(prices); i++ {
-		ema[i] = (prices[i]-ema[i-1])*mult + ema[i-1]
-	}
-	return ema
-}
-
-// ComputeMACD calcula a linha MACD, a linha de sinal e o histograma.
-func ComputeMACD(prices []float64, fastPeriod, slowPeriod, signalPeriod int) (macdLine, signalLine, histogram []float64) {
-	fastEMA := ComputeEMA(prices, fastPeriod)
-	slowEMA := ComputeEMA(prices, slowPeriod)
-	length := len(prices)
-
-	macdLine = make([]float64, length)
-	for i := 0; i < length; i++ {
-		macdLine[i] = fastEMA[i] - slowEMA[i]
-	}
-
-	signalLine = ComputeEMA(macdLine, signalPeriod)
-
-	histogram = make([]float64, length)
-	for i := 0; i < length; i++ {
-		histogram[i] = macdLine[i] - signalLine[i]
+	signalLine := computeEMA(macdLine, signalPeriod)
+	histogram := make([]float64, len(signalLine))
+	for i := range signalLine {
+		histogram[i] = macdLine[i+len(macdLine)-len(signalLine)] - signalLine[i]
 	}
 
 	return macdLine, signalLine, histogram
 }
 
-// ComputeRSI calcula o Índice de Força Relativa (RSI) para um slice de preços e período.
-func ComputeRSI(prices []float64, period int) []float64 {
-	rsi := make([]float64, len(prices))
-	if period <= 0 || len(prices) <= period {
-		return rsi
+func ComputeVolumeMA(volumes []float64, period int) float64 {
+	if len(volumes) < period {
+		return 0
 	}
-
-	gains := make([]float64, len(prices))
-	losses := make([]float64, len(prices))
-	for i := 1; i < len(prices); i++ {
-		delta := prices[i] - prices[i-1]
-		if delta > 0 {
-			gains[i] = delta
-		} else {
-			losses[i] = -delta
-		}
-	}
-
-	sumGain, sumLoss := 0.0, 0.0
-	for i := 1; i <= period; i++ {
-		sumGain += gains[i]
-		sumLoss += losses[i]
-	}
-	rs := sumGain / sumLoss
-	rsi[period] = 100 - (100 / (1 + rs))
-
-	for i := period + 1; i < len(prices); i++ {
-		sumGain = (sumGain*float64(period-1) + gains[i]) / float64(period)
-		sumLoss = (sumLoss*float64(period-1) + losses[i]) / float64(period)
-		rs = sumGain / sumLoss
-		rsi[i] = 100 - (100 / (1 + rs))
-	}
-
-	return rsi
-}
-
-// ComputeVolumeMA calcula a Média Móvel Simples do volume.
-func ComputeVolumeMA(volumes []float64, period int) []float64 {
-	ma := make([]float64, len(volumes))
-	if period <= 0 || len(volumes) < period {
-		return ma
-	}
-
-	sum := 0.0
-	for i := 0; i < period; i++ {
+	var sum float64
+	for i := len(volumes) - period; i < len(volumes); i++ {
 		sum += volumes[i]
 	}
-	ma[period-1] = sum / float64(period)
-
-	for i := period; i < len(volumes); i++ {
-		sum += volumes[i] - volumes[i-period]
-		ma[i] = sum / float64(period)
-	}
-	return ma
+	return sum / float64(period)
 }
 
-// --- NOVAS FUNÇÕES AUXILIARES ---
-
-// Último valor do MACD
-func LastMACD(prices []float64, fast, slow, signal int) (macd, signalLine, hist float64) {
-	m, s, h := ComputeMACD(prices, fast, slow, signal)
-	last := len(prices) - 1
-	return m[last], s[last], h[last]
-}
-
-// Último valor do RSI
-func LastRSI(prices []float64, period int) float64 {
-	r := ComputeRSI(prices, period)
-	return r[len(prices)-1]
-}
-
-// Último valor da média de volume
-func LastVolumeMA(vols []float64, period int) float64 {
-	v := ComputeVolumeMA(vols, period)
-	return v[len(vols)-1]
-}
-
-// Extrai os preços de abertura
-func ExtractOpenPrices(klines [][]interface{}) []float64 {
-	opens := make([]float64, len(klines))
-	for i, k := range klines {
-		if s, ok := k[1].(string); ok {
-			val, _ := strconv.ParseFloat(s, 64)
-			opens[i] = val
+func computeEMA(data []float64, period int) []float64 {
+	var ema []float64
+	k := 2.0 / (float64(period) + 1.0)
+	for i := 0; i < len(data); i++ {
+		if i < period {
+			continue
+		}
+		if len(ema) == 0 {
+			var sum float64
+			for j := i - period; j < i; j++ {
+				sum += data[j]
+			}
+			ema = append(ema, sum/float64(period))
+		} else {
+			prev := ema[len(ema)-1]
+			ema = append(ema, (data[i]-prev)*k+prev)
 		}
 	}
-	return opens
-}
-
-// Verifica se a última vela está em tamanho razoável
-func IsCandleReasonable(klines [][]interface{}, lookback int, maxFactor float64) bool {
-	if len(klines) < lookback+1 {
-		return true
-	}
-
-	last := len(klines) - 1
-	var sum float64
-	for i := last - lookback; i < last; i++ {
-		high := parseStrToFloat(klines[i][2])
-		low := parseStrToFloat(klines[i][3])
-		sum += high - low
-	}
-	avgRange := sum / float64(lookback)
-
-	// Faixa da última vela
-	hlLast := parseStrToFloat(klines[last][2]) - parseStrToFloat(klines[last][3])
-
-	return hlLast <= avgRange*maxFactor
-}
-
-func parseStrToFloat(val interface{}) float64 {
-	if s, ok := val.(string); ok {
-		f, _ := strconv.ParseFloat(s, 64)
-		return f
-	}
-	return 0
+	return ema
 }
