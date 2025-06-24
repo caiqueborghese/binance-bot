@@ -1,4 +1,3 @@
-// client.go (ajustes na função PlaceMarketOrder com reduceOnly e newOrderRespType)
 package binance
 
 import (
@@ -166,7 +165,6 @@ func (c *BinanceRestClient) GetKlines(symbol, interval string, limit int) [][]in
 	return klines
 }
 
-// ✅ Novo método para obter o markPrice real da Binance
 func (c *BinanceRestClient) GetMarkPrice(symbol string) float64 {
 	endpoint := fmt.Sprintf("%s/fapi/v1/premiumIndex?symbol=%s", c.BaseURL, symbol)
 	resp, err := http.Get(endpoint)
@@ -186,4 +184,11 @@ func (c *BinanceRestClient) GetMarkPrice(symbol string) float64 {
 	}
 	price, _ := strconv.ParseFloat(data.MarkPrice, 64)
 	return price
+}
+
+// ✅ Função auxiliar de assinatura para posição
+func Sign(data, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(data))
+	return hex.EncodeToString(h.Sum(nil))
 }
