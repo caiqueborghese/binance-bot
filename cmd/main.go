@@ -1,10 +1,11 @@
-// cmd/main.go
+// main.go atualizado com lógica de PnL precisa e controle de posições
 package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -20,7 +21,23 @@ import (
 	"binance-bot/internal/telegram"
 )
 
-func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, float64, float64, error) {
+func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, float64, string, float64, float64, error) {
+	// 1. Obtem o preço de marca (Mark Price)
+	markPriceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
+	resp, err := http.Get(markPriceURL)
+	if err != nil {
+		return false, 0, "", 0, 0, fmt.Errorf("erro ao obter mark price: %v", err)
+	}
+	defer resp.Body.Close()
+	var markData struct {
+		MarkPrice string `json:"markPrice"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&markData); err != nil {
+		return false, 0, "", 0, 0, fmt.Errorf("erro ao decodificar mark price: %v", err)
+	}
+	markPrice, _ := strconv.ParseFloat(markData.MarkPrice, 64)
+
+	// 2. Obtem os dados da posição
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params := "timestamp=" + timestamp
 	signature := binance.Sign(params, apiSecret)
@@ -28,43 +45,55 @@ func fetchPositionPNL(apiKey, apiSecret, symbol string) (float64, float64, float
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return 0, 0, 0, err
+		return false, 0, "", 0, 0, err
 	}
 	req.Header.Set("X-MBX-APIKEY", apiKey)
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, 0, 0, err
+		return false, 0, "", 0, 0, err
 	}
 	defer resp.Body.Close()
 
 	var data []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return 0, 0, 0, err
+		return false, 0, "", 0, 0, err
 	}
 
 	for _, item := range data {
 		if item["symbol"] == symbol {
-			entryPrice, _ := strconv.ParseFloat(item["entryPrice"].(string), 64)
-			markPrice, _ := strconv.ParseFloat(item["markPrice"].(string), 64)
-			positionAmt, _ := strconv.ParseFloat(item["positionAmt"].(string), 64)
-
-			if positionAmt == 0 {
-				return 0, 0, 0, nil
+			posAmt, _ := strconv.ParseFloat(item["positionAmt"].(string), 64)
+			if posAmt == 0 {
+				return false, 0, "", 0, 0, nil
 			}
+			entry, _ := strconv.ParseFloat(item["entryPrice"].(string), 64)
 
-			var pnlPercent float64
-			if positionAmt > 0 {
-				pnlPercent = ((markPrice - entryPrice) / entryPrice) * 100
+			// 3. Cálculo do PnL com alavancagem
+			var pnl float64
+			if posAmt > 0 {
+				pnl = (markPrice - entry) / entry * leverage * 100
 			} else {
-				pnlPercent = ((entryPrice - markPrice) / entryPrice) * 100
+				pnl = (entry - markPrice) / entry * leverage * 100
 			}
 
-			return pnlPercent, entryPrice, markPrice, nil
+			side := "BUY"
+			if posAmt < 0 {
+				side = "SELL"
+			}
+
+			log.Printf("🔍 Position Debug | Side: %s | Qty: %.2f | Entry: %.4f | Mark: %.4f | PnL: %.2f%%",
+				side, math.Abs(posAmt), entry, markPrice, pnl)
+
+			return true, math.Abs(posAmt), side, entry, pnl, nil
 		}
 	}
+	return false, 0, "", 0, 0, nil
+}
 
-	return 0, 0, 0, fmt.Errorf("posição não encontrada para %s", symbol)
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func main() {
@@ -85,9 +114,14 @@ func main() {
 	}
 	client := binance.NewBinanceRestClient(cfg)
 
-	symbol := "XRPUSDT"
+	symbol := "ETHUSDT"
 	leverage := 20.0
-	inPosition := false
+	stepSizes := map[string]float64{
+		"BTCUSDT": 0.001,
+		"ETHUSDT": 0.01,
+		"XRPUSDT": 0.1,
+	}
+	stepSize := stepSizes[symbol]
 
 	for {
 		saldo := client.GetUSDTBalance()
@@ -100,102 +134,96 @@ func main() {
 		rsi := indicators.ComputeRSI(closes, 14)
 		volMA := indicators.ComputeVolumeMA(volumes, 14)
 
-		price := closes[len(closes)-1]
+		currentPrice := client.GetMarkPrice(symbol)
 		sig := strategy.EvaluateSignal(klines)
 
-		pnl, entry, mark, err := fetchPositionPNL(apiKey, apiSecret, symbol)
+		inPosition, qty, side, entryPrice, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
 		if err != nil {
-			log.Printf("Erro ao buscar PNL: %v\n", err)
+			log.Printf("Erro ao buscar posição: %v\n", err)
+			time.Sleep(10 * time.Second)
+			continue
 		}
-		fmt.Printf("📈 Verificando PnL: %.2f%% | Lucro: %.4f | Notional: %.2f\n", pnl, mark-entry, mark*leverage)
+
+		fmt.Printf("📊 Posição — Entry: %.4f | Mark: %.4f | PnL: %.2f%%\n", entryPrice, currentPrice, pnl)
 
 		if inPosition {
-			if pnl >= 3.0 {
-				msg := fmt.Sprintf("🎯 TAKE PROFIT atingido (+%.2f%%)! Fechando posição.", pnl)
+			fmt.Printf("📈 Em posição: %s | Qty: %.2f | Entrada: %.4f | PnL: %.2f%%\n", side, qty, entryPrice, pnl)
+
+			if pnl >= 3.0 || pnl <= -1.0 {
+				motivo := "TAKE PROFIT"
+				if pnl <= -1.0 {
+					motivo = "STOP LOSS"
+				}
+
+				if qty < stepSize {
+					log.Printf("❌ Quantidade abaixo do mínimo (%s): %.4f < %.4f", symbol, qty, stepSize)
+					time.Sleep(10 * time.Second)
+					continue
+				}
+
+				closeSide := "SELL"
+				if side == "SELL" {
+					closeSide = "BUY"
+				}
+
+				msg := fmt.Sprintf("🔴 %s (%.2f%%) - Fechando posição %s Qty: %.1f", motivo, pnl, side, qty)
 				fmt.Println(msg)
-				client.PlaceMarketOrder(symbol, "BUY", 100)
-				telegram.SendMessage(msg)
-				logger.LogTrade(symbol, "TP-CLOSE", 100, price, saldo)
-				inPosition = false
-			} else if pnl <= -1.0 {
-				msg := fmt.Sprintf("⚠️ STOP LOSS ativado (%.2f%%)! Fechando posição.", pnl)
-				fmt.Println(msg)
-				client.PlaceMarketOrder(symbol, "BUY", 100)
-				telegram.SendMessage(msg)
-				logger.LogTrade(symbol, "SL-CLOSE", 100, price, saldo)
-				inPosition = false
-			} else {
-				fmt.Printf("📊 Em posição - Variação atual: %.2f%%\n", pnl)
+
+				ok := client.PlaceMarketOrder(symbol, closeSide, qty, true)
+				if ok {
+					telegram.SendMessage(msg)
+					logger.LogTrade(symbol, motivo+"-CLOSE", qty, currentPrice, saldo)
+				} else {
+					fmt.Println("❌ Erro ao fechar posição!")
+				}
+				time.Sleep(10 * time.Second)
+				continue
 			}
-			time.Sleep(60 * time.Second)
+			time.Sleep(10 * time.Second)
 			continue
 		}
 
-		rawQty := saldo * 0.95 * leverage / price
-		if rawQty < 1.0 {
-			log.Println("❌ Quantidade insuficiente para ordem mínima. Aguardando...")
-			time.Sleep(60 * time.Second)
+		rawQty := saldo * 0.90 * leverage / currentPrice
+		if rawQty < stepSize {
+			log.Printf("❌ Quantidade insuficiente para %s (min: %.4f)", symbol, stepSize)
+			time.Sleep(30 * time.Second)
 			continue
 		}
-		qty, _ := strconv.ParseFloat(fmt.Sprintf("%.1f", rawQty), 64)
+		orderQty := math.Floor(rawQty/stepSize) * stepSize
 
 		switch sig {
 		case strategy.BuySignal:
-			msg := fmt.Sprintf("🟢 COMPRA: %s | qty %.3f | alav %.0fx", symbol, qty, leverage)
-			fmt.Println(msg)
-			ok := client.PlaceMarketOrder(symbol, "BUY", qty)
-			if ok {
-				inPosition = true
-				msgDet := fmt.Sprintf(
-					"%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs Média: %.2f\n\n💰 Preço de entrada: %.4f\n🔁 Quantidade: %.1f\n⚙️ Alavancagem: %.0fx\n💼 Saldo USDT: %.2f\n\n⏱ Intervalo: 1m | Ativo: %s",
-					msg,
-					macdLine[len(macdLine)-1],
-					signalLine[len(signalLine)-1],
-					rsi[len(rsi)-1],
-					volumes[len(volumes)-1],
-					volMA[len(volMA)-1],
-					price,
-					qty,
-					leverage,
-					saldo,
-					symbol,
-				)
-				telegram.SendMessage(msgDet)
-				logger.LogTrade(symbol, "BUY", qty, price, saldo)
-			} else {
-				fmt.Println("❌ Erro ao executar ordem de compra!")
-			}
-
+			side = "BUY"
 		case strategy.SellSignal:
-			msg := fmt.Sprintf("🔴 VENDA: %s | qty %.3f | alav %.0fx", symbol, qty, leverage)
-			fmt.Println(msg)
-			ok := client.PlaceMarketOrder(symbol, "SELL", qty)
-			if ok {
-				inPosition = true
-				msgDet := fmt.Sprintf(
-					"%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs Média: %.2f\n\n💰 Preço de entrada: %.4f\n🔁 Quantidade: %.1f\n⚙️ Alavancagem: %.0fx\n💼 Saldo USDT: %.2f\n\n⏱ Intervalo: 1m | Ativo: %s",
-					msg,
-					macdLine[len(macdLine)-1],
-					signalLine[len(signalLine)-1],
-					rsi[len(rsi)-1],
-					volumes[len(volumes)-1],
-					volMA[len(volMA)-1],
-					price,
-					qty,
-					leverage,
-					saldo,
-					symbol,
-				)
-				telegram.SendMessage(msgDet)
-				logger.LogTrade(symbol, "SELL", qty, price, saldo)
-			} else {
-				fmt.Println("❌ Erro ao executar ordem de venda!")
-			}
-
+			side = "SELL"
 		default:
 			fmt.Println("⚪ Nenhum sinal — aguardando próximo candle...")
+			time.Sleep(10 * time.Second)
+			continue
 		}
 
-		time.Sleep(60 * time.Second)
+		msg := fmt.Sprintf("🟢 %s: %s | qty %.3f | alav %.0fx", side, symbol, orderQty, leverage)
+		fmt.Println(msg)
+		ok := client.PlaceMarketOrder(symbol, side, orderQty, false)
+		if ok {
+			msgDet := fmt.Sprintf(
+				"%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs MA: %.2f\n💰 Preço: %.4f | Quantidade: %.1f | Saldo: %.2f",
+				msg,
+				macdLine[len(macdLine)-1],
+				signalLine[len(signalLine)-1],
+				rsi[len(rsi)-1],
+				volumes[len(volumes)-1],
+				volMA[len(volMA)-1],
+				currentPrice,
+				orderQty,
+				saldo,
+			)
+			telegram.SendMessage(msgDet)
+			logger.LogTrade(symbol, side, orderQty, currentPrice, saldo)
+		} else {
+			fmt.Println("❌ Erro ao executar ordem!")
+		}
+
+		time.Sleep(10 * time.Second)
 	}
 }
