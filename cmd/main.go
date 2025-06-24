@@ -1,4 +1,4 @@
-// main.go com suporte a múltiplos pares
+// main.go com suporte a múltiplos pares e cálculo de lucro real
 package main
 
 import (
@@ -181,13 +181,20 @@ func main() {
 						closeSide = "BUY"
 					}
 
-					msg := fmt.Sprintf("🔴 %s (%s %.2f%%) Fechando %s Qty: %.3f", symbol, motivo, pnl, side, qty)
-					fmt.Println(msg)
-
+					saldoAntes := client.GetUSDTBalance()
 					ok := client.PlaceMarketOrder(symbol, closeSide, qty, true)
 					if ok {
-						telegram.SendMessage(msg)
-						logger.LogTrade(symbol, motivo+"-CLOSE", qty, currentPrice, saldo)
+						time.Sleep(1 * time.Second)
+						saldoDepois := client.GetUSDTBalance()
+						lucroReal := saldoDepois - saldoAntes
+
+						msgLucro := fmt.Sprintf("🔎 Lucro real: %.4f USDT (%.2f%%)", lucroReal, pnl)
+						msg := fmt.Sprintf("🔴 %s (%s %.2f%%) Fechando %s Qty: %.3f", symbol, motivo, pnl, side, qty)
+						fmt.Println(msg)
+						fmt.Println(msgLucro)
+
+						telegram.SendMessage(msg + "\n" + msgLucro)
+						logger.LogTrade(symbol, motivo+"-CLOSE", qty, currentPrice, saldoDepois)
 					} else {
 						fmt.Println("❌ Erro ao fechar posição!")
 					}
@@ -214,11 +221,16 @@ func main() {
 				continue
 			}
 
+			saldoAntes := client.GetUSDTBalance()
 			msg := fmt.Sprintf("🟢 %s %s | qty %.3f | alav %.0fx", orderSide, symbol, orderQty, leverage)
 			fmt.Println(msg)
 			ok := client.PlaceMarketOrder(symbol, orderSide, orderQty, false)
 			if ok {
-				msgDet := fmt.Sprintf("%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs MA: %.2f\n💰 Preço: %.4f | Quantidade: %.1f | Saldo: %.2f",
+				time.Sleep(1 * time.Second)
+				saldoDepois := client.GetUSDTBalance()
+				custo := saldoAntes - saldoDepois
+
+				msgDet := fmt.Sprintf("%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs MA: %.2f\n💰 Preço: %.4f | Quantidade: %.1f | Custo: %.4f | Saldo: %.2f",
 					msg,
 					macdLine[len(macdLine)-1],
 					signalLine[len(signalLine)-1],
@@ -227,15 +239,15 @@ func main() {
 					volMA,
 					currentPrice,
 					orderQty,
-					saldo,
+					custo,
+					saldoDepois,
 				)
 				telegram.SendMessage(msgDet)
-				logger.LogTrade(symbol, orderSide, orderQty, currentPrice, saldo)
+				logger.LogTrade(symbol, orderSide, orderQty, currentPrice, saldoDepois)
 			} else {
 				fmt.Println("❌ Erro ao executar ordem!")
 			}
 		}
-
 		time.Sleep(2 * time.Second)
 	}
 }
