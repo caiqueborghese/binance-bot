@@ -1,3 +1,4 @@
+// main.go com suporte a múltiplos pares
 package main
 
 import (
@@ -76,7 +77,7 @@ func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, 
 				side = "SELL"
 			}
 
-			log.Printf("🔍 Position Debug | Side: %s | Qty: %.2f | Entry: %.4f | Mark: %.4f | PnL: %.2f%%",
+			log.Printf("🔍 Position Debug | %s | Qty: %.2f | Entry: %.4f | Mark: %.4f | PnL: %.2f%%",
 				side, math.Abs(posAmt), entry, markPrice, pnl)
 
 			return true, math.Abs(posAmt), side, entry, pnl, nil
@@ -110,116 +111,129 @@ func main() {
 	}
 	client := binance.NewBinanceRestClient(cfg)
 
-	symbol := "ETHUSDT"
+	symbols := []string{
+		"ETHUSDT",
+		"BTCUSDT",
+		"XRPUSDT",
+		"BNBUSDT",
+		"ADAUSDT",
+		"SOLUSDT",
+		"MATICUSDT",
+		"DOTUSDT",
+		"AVAXUSDT",
+		"LINKUSDT",
+	}
+
 	leverage := 20.0
 	stepSizes := map[string]float64{
-		"BTCUSDT": 0.001,
-		"ETHUSDT": 0.01,
-		"XRPUSDT": 0.1,
+		"ETHUSDT":   0.01,
+		"BTCUSDT":   0.001,
+		"XRPUSDT":   0.1,
+		"BNBUSDT":   0.01,
+		"ADAUSDT":   1.0,
+		"SOLUSDT":   0.01,
+		"MATICUSDT": 1.0,
+		"DOTUSDT":   0.1,
+		"AVAXUSDT":  0.01,
+		"LINKUSDT":  0.1,
 	}
-	stepSize := stepSizes[symbol]
 
 	for {
 		saldo := client.GetUSDTBalance()
 		fmt.Printf("\n💰 Saldo USDT: %.2f\n", saldo)
 
-		rawKlines := client.GetKlines(symbol, "1m", 100)
-		klines := indicators.ConvertToKlines(rawKlines)
+		for _, symbol := range symbols {
+			stepSize := stepSizes[symbol]
+			rawKlines := client.GetKlines(symbol, "1m", 100)
+			klines := indicators.ConvertToKlines(rawKlines)
 
-		closes := indicators.ExtractClosePrices(klines)
-		volumes := indicators.ExtractVolumes(klines)
-		macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
-		rsi := indicators.ComputeRSI(closes, 14)
-		volMA := indicators.ComputeVolumeMA(volumes, 14)
+			closes := indicators.ExtractClosePrices(klines)
+			volumes := indicators.ExtractVolumes(klines)
+			macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
+			rsi := indicators.ComputeRSI(closes, 14)
+			volMA := indicators.ComputeVolumeMA(volumes, 14)
 
-		currentPrice := client.GetMarkPrice(symbol)
-		sig := strategy.EvaluateSignal(klines)
+			currentPrice := client.GetMarkPrice(symbol)
+			sig := strategy.EvaluateSignal(klines)
 
-		inPosition, qty, side, entryPrice, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
-		if err != nil {
-			log.Printf("Erro ao buscar posição: %v\n", err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		fmt.Printf("📊 Posição — Entry: %.4f | Mark: %.4f | PnL: %.2f%%\n", entryPrice, currentPrice, pnl)
-
-		if inPosition {
-			fmt.Printf("📈 Em posição: %s | Qty: %.2f | Entrada: %.4f | PnL: %.2f%%\n", side, qty, entryPrice, pnl)
-
-			if pnl >= 1.0 || pnl <= -1.0 {
-				motivo := "TAKE PROFIT"
-				if pnl <= -1.0 {
-					motivo = "STOP LOSS"
-				}
-
-				if qty < stepSize {
-					log.Printf("❌ Quantidade abaixo do mínimo (%s): %.4f < %.4f", symbol, qty, stepSize)
-					time.Sleep(2 * time.Second)
-					continue
-				}
-
-				closeSide := "SELL"
-				if side == "SELL" {
-					closeSide = "BUY"
-				}
-
-				msg := fmt.Sprintf("🔴 %s (%.2f%%) - Fechando posição %s Qty: %.1f", motivo, pnl, side, qty)
-				fmt.Println(msg)
-
-				ok := client.PlaceMarketOrder(symbol, closeSide, qty, true)
-				if ok {
-					telegram.SendMessage(msg)
-					logger.LogTrade(symbol, motivo+"-CLOSE", qty, currentPrice, saldo)
-				} else {
-					fmt.Println("❌ Erro ao fechar posição!")
-				}
-				time.Sleep(2 * time.Second)
+			inPosition, qty, side, entryPrice, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
+			if err != nil {
+				log.Printf("Erro ao buscar posição para %s: %v\n", symbol, err)
 				continue
 			}
-			time.Sleep(2 * time.Second)
-			continue
-		}
 
-		rawQty := saldo * 0.90 * leverage / currentPrice
-		if rawQty < stepSize {
-			log.Printf("❌ Quantidade insuficiente para %s (min: %.4f)", symbol, stepSize)
-			time.Sleep(3 * time.Second)
-			continue
-		}
-		orderQty := math.Floor(rawQty/stepSize) * stepSize
+			if inPosition {
+				fmt.Printf("📈 %s — Entrada: %.4f | Mark: %.4f | PnL: %.2f%%\n", symbol, entryPrice, currentPrice, pnl)
 
-		switch sig {
-		case strategy.BuySignal:
-			side = "BUY"
-		case strategy.SellSignal:
-			side = "SELL"
-		default:
-			fmt.Println("⚪ Nenhum sinal — aguardando próximo candle...")
-			time.Sleep(2 * time.Second)
-			continue
-		}
+				if pnl >= 1.0 || pnl <= -1.0 {
+					motivo := "TAKE PROFIT"
+					if pnl <= -1.0 {
+						motivo = "STOP LOSS"
+					}
 
-		msg := fmt.Sprintf("🟢 %s: %s | qty %.3f | alav %.0fx", side, symbol, orderQty, leverage)
-		fmt.Println(msg)
-		ok := client.PlaceMarketOrder(symbol, side, orderQty, false)
-		if ok {
-			msgDet := fmt.Sprintf(
-				"%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs MA: %.2f\n💰 Preço: %.4f | Quantidade: %.1f | Saldo: %.2f",
-				msg,
-				macdLine[len(macdLine)-1],
-				signalLine[len(signalLine)-1],
-				rsi[len(rsi)-1],
-				volumes[len(volumes)-1],
-				volMA,
-				currentPrice,
-				orderQty,
-				saldo,
-			)
-			telegram.SendMessage(msgDet)
-			logger.LogTrade(symbol, side, orderQty, currentPrice, saldo)
-		} else {
-			fmt.Println("❌ Erro ao executar ordem!")
+					if qty < stepSize {
+						log.Printf("❌ Quantidade abaixo do mínimo (%s): %.4f < %.4f", symbol, qty, stepSize)
+						continue
+					}
+
+					closeSide := "SELL"
+					if side == "SELL" {
+						closeSide = "BUY"
+					}
+
+					msg := fmt.Sprintf("🔴 %s (%s %.2f%%) Fechando %s Qty: %.3f", symbol, motivo, pnl, side, qty)
+					fmt.Println(msg)
+
+					ok := client.PlaceMarketOrder(symbol, closeSide, qty, true)
+					if ok {
+						telegram.SendMessage(msg)
+						logger.LogTrade(symbol, motivo+"-CLOSE", qty, currentPrice, saldo)
+					} else {
+						fmt.Println("❌ Erro ao fechar posição!")
+					}
+					continue
+				}
+				continue
+			}
+
+			rawQty := saldo * 0.90 * leverage / currentPrice
+			if rawQty < stepSize {
+				log.Printf("❌ Quantidade insuficiente para %s (min: %.4f)", symbol, stepSize)
+				continue
+			}
+			orderQty := math.Floor(rawQty/stepSize) * stepSize
+
+			var orderSide string
+			switch sig {
+			case strategy.BuySignal:
+				orderSide = "BUY"
+			case strategy.SellSignal:
+				orderSide = "SELL"
+			default:
+				fmt.Printf("⚪ %s: Nenhum sinal válido\n", symbol)
+				continue
+			}
+
+			msg := fmt.Sprintf("🟢 %s %s | qty %.3f | alav %.0fx", orderSide, symbol, orderQty, leverage)
+			fmt.Println(msg)
+			ok := client.PlaceMarketOrder(symbol, orderSide, orderQty, false)
+			if ok {
+				msgDet := fmt.Sprintf("%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs MA: %.2f\n💰 Preço: %.4f | Quantidade: %.1f | Saldo: %.2f",
+					msg,
+					macdLine[len(macdLine)-1],
+					signalLine[len(signalLine)-1],
+					rsi[len(rsi)-1],
+					volumes[len(volumes)-1],
+					volMA,
+					currentPrice,
+					orderQty,
+					saldo,
+				)
+				telegram.SendMessage(msgDet)
+				logger.LogTrade(symbol, orderSide, orderQty, currentPrice, saldo)
+			} else {
+				fmt.Println("❌ Erro ao executar ordem!")
+			}
 		}
 
 		time.Sleep(2 * time.Second)
