@@ -118,3 +118,24 @@ func computeEMA(data []float64, period int) []float64 {
 	}
 	return ema
 }
+
+func ComputeATR(klines []types.Kline, period int) float64 {
+	if len(klines) < period+1 {
+		return 0
+	}
+	var trs []float64
+	for i := 1; i < len(klines); i++ {
+		high := klines[i].High
+		low := klines[i].Low
+		closePrev := klines[i-1].Close
+
+		tr := math.Max(high-low, math.Max(math.Abs(high-closePrev), math.Abs(low-closePrev)))
+		trs = append(trs, tr)
+	}
+
+	var sum float64
+	for i := len(trs) - period; i < len(trs); i++ {
+		sum += trs[i]
+	}
+	return sum / float64(period)
+}

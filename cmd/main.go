@@ -1,4 +1,4 @@
-// main.go com suporte a múltiplos pares e cálculo de lucro real
+// main.go com trailing stop dinâmico baseado no ATR
 package main
 
 import (
@@ -86,13 +86,6 @@ func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, 
 	return false, 0, "", 0, 0, nil
 }
 
-func abs(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println(".env não encontrado, usando variáveis de ambiente")
@@ -111,32 +104,18 @@ func main() {
 	}
 	client := binance.NewBinanceRestClient(cfg)
 
-	symbols := []string{
-		"ETHUSDT",
-		"BTCUSDT",
-		"XRPUSDT",
-		"BNBUSDT",
-		"ADAUSDT",
-		"SOLUSDT",
-		"MATICUSDT",
-		"DOTUSDT",
-		"AVAXUSDT",
-		"LINKUSDT",
-	}
-
+	symbols := []string{"ETHUSDT", "BTCUSDT", "XRPUSDT", "BNBUSDT", "ADAUSDT", "SOLUSDT", "MATICUSDT", "DOTUSDT", "AVAXUSDT", "LINKUSDT"}
 	leverage := 20.0
 	stepSizes := map[string]float64{
-		"ETHUSDT":   0.01,
-		"BTCUSDT":   0.001,
-		"XRPUSDT":   0.1,
-		"BNBUSDT":   0.01,
-		"ADAUSDT":   1.0,
-		"SOLUSDT":   0.01,
-		"MATICUSDT": 1.0,
-		"DOTUSDT":   0.1,
-		"AVAXUSDT":  0.01,
-		"LINKUSDT":  0.1,
+		"ETHUSDT": 0.01, "BTCUSDT": 0.001, "XRPUSDT": 0.1, "BNBUSDT": 0.01,
+		"ADAUSDT": 1.0, "SOLUSDT": 0.01, "MATICUSDT": 1.0, "DOTUSDT": 0.1,
+		"AVAXUSDT": 0.01, "LINKUSDT": 0.1,
 	}
+
+	trailingStops := make(map[string]struct {
+		TP float64
+		SL float64
+	})
 
 	for {
 		saldo := client.GetUSDTBalance()
@@ -152,10 +131,10 @@ func main() {
 			macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
 			rsi := indicators.ComputeRSI(closes, 14)
 			volMA := indicators.ComputeVolumeMA(volumes, 14)
-
+			atr := indicators.ComputeATR(klines, 14)
 			currentPrice := client.GetMarkPrice(symbol)
-			sig := strategy.EvaluateSignal(klines)
 
+			sig := strategy.EvaluateSignal(klines, symbol)
 			inPosition, qty, side, entryPrice, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
 			if err != nil {
 				log.Printf("Erro ao buscar posição para %s: %v\n", symbol, err)
@@ -163,42 +142,42 @@ func main() {
 			}
 
 			if inPosition {
-				fmt.Printf("📈 %s — Entrada: %.4f | Mark: %.4f | PnL: %.2f%%\n", symbol, entryPrice, currentPrice, pnl)
+				stops, exists := trailingStops[symbol]
+				if !exists {
+					tp, sl := strategy.ComputeTrailingStops(entryPrice, side, atr)
+					stops = struct{ TP, SL float64 }{tp, sl}
+					trailingStops[symbol] = stops
+					log.Printf("📍 Trailing stop definido: TP %.4f | SL %.4f\n", tp, sl)
+				}
+				if (side == "BUY" && (currentPrice >= stops.TP || currentPrice <= stops.SL)) ||
+					(side == "SELL" && (currentPrice <= stops.TP || currentPrice >= stops.SL)) {
 
-				if pnl >= 3.0 || pnl <= -1.0 {
-					motivo := "TAKE PROFIT"
-					if pnl <= -1.0 {
-						motivo = "STOP LOSS"
+					motivo := "TRAILING TP"
+					if (side == "BUY" && currentPrice <= stops.SL) || (side == "SELL" && currentPrice >= stops.SL) {
+						motivo = "TRAILING SL"
 					}
-
-					if qty < stepSize {
-						log.Printf("❌ Quantidade abaixo do mínimo (%s): %.4f < %.4f", symbol, qty, stepSize)
-						continue
-					}
-
 					closeSide := "SELL"
 					if side == "SELL" {
 						closeSide = "BUY"
 					}
-
+					if qty < stepSize {
+						log.Printf("❌ Quantidade abaixo do mínimo (%s): %.4f < %.4f", symbol, qty, stepSize)
+						continue
+					}
 					saldoAntes := client.GetUSDTBalance()
 					ok := client.PlaceMarketOrder(symbol, closeSide, qty, true)
 					if ok {
 						time.Sleep(1 * time.Second)
 						saldoDepois := client.GetUSDTBalance()
 						lucroReal := saldoDepois - saldoAntes
-
+						msg := fmt.Sprintf("🔴 %s (%s) Fechando %s Qty: %.3f", symbol, motivo, side, qty)
 						msgLucro := fmt.Sprintf("🔎 Lucro real: %.4f USDT (%.2f%%)", lucroReal, pnl)
-						msg := fmt.Sprintf("🔴 %s (%s %.2f%%) Fechando %s Qty: %.3f", symbol, motivo, pnl, side, qty)
-						fmt.Println(msg)
-						fmt.Println(msgLucro)
-
 						telegram.SendMessage(msg + "\n" + msgLucro)
 						logger.LogTrade(symbol, motivo+"-CLOSE", qty, currentPrice, saldoDepois)
+						delete(trailingStops, symbol)
 					} else {
 						fmt.Println("❌ Erro ao fechar posição!")
 					}
-					continue
 				}
 				continue
 			}
@@ -209,7 +188,6 @@ func main() {
 				continue
 			}
 			orderQty := math.Floor(rawQty/stepSize) * stepSize
-
 			var orderSide string
 			switch sig {
 			case strategy.BuySignal:
@@ -229,7 +207,6 @@ func main() {
 				time.Sleep(1 * time.Second)
 				saldoDepois := client.GetUSDTBalance()
 				custo := saldoAntes - saldoDepois
-
 				msgDet := fmt.Sprintf("%s\n\n📊 Indicadores:\n- MACD: %.4f / %.4f\n- RSI: %.2f\n- Volume: %.2f vs MA: %.2f\n💰 Preço: %.4f | Quantidade: %.1f | Custo: %.4f | Saldo: %.2f",
 					msg,
 					macdLine[len(macdLine)-1],
@@ -240,8 +217,7 @@ func main() {
 					currentPrice,
 					orderQty,
 					custo,
-					saldoDepois,
-				)
+					saldoDepois)
 				telegram.SendMessage(msgDet)
 				logger.LogTrade(symbol, orderSide, orderQty, currentPrice, saldoDepois)
 			} else {
