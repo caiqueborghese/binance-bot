@@ -1,4 +1,4 @@
-// main.go com trailing stop dinâmico baseado no ATR
+// main.go com trailing stop dinâmico (1%) e stop loss ampliado para -5%
 package main
 
 import (
@@ -20,6 +20,12 @@ import (
 	"binance-bot/internal/strategy"
 	"binance-bot/internal/telegram"
 )
+
+type TrailingStatus struct {
+	Entry   float64
+	Side    string
+	MaxGain float64
+}
 
 func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, float64, string, float64, float64, error) {
 	markPriceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
@@ -112,10 +118,7 @@ func main() {
 		"AVAXUSDT": 0.01, "LINKUSDT": 0.1,
 	}
 
-	trailingStops := make(map[string]struct {
-		TP float64
-		SL float64
-	})
+	trailings := make(map[string]*TrailingStatus)
 
 	for {
 		saldo := client.GetUSDTBalance()
@@ -125,37 +128,44 @@ func main() {
 			stepSize := stepSizes[symbol]
 			rawKlines := client.GetKlines(symbol, "1m", 100)
 			klines := indicators.ConvertToKlines(rawKlines)
-
 			closes := indicators.ExtractClosePrices(klines)
 			volumes := indicators.ExtractVolumes(klines)
 			macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
 			rsi := indicators.ComputeRSI(closes, 14)
 			volMA := indicators.ComputeVolumeMA(volumes, 14)
-			atr := indicators.ComputeATR(klines, 14)
 			currentPrice := client.GetMarkPrice(symbol)
 
 			sig := strategy.EvaluateSignal(klines, symbol)
-			inPosition, qty, side, entryPrice, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
+			inPosition, qty, side, entryPrice, gain, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
 			if err != nil {
 				log.Printf("Erro ao buscar posição para %s: %v\n", symbol, err)
 				continue
 			}
 
 			if inPosition {
-				stops, exists := trailingStops[symbol]
+				trailing, exists := trailings[symbol]
 				if !exists {
-					tp, sl := strategy.ComputeTrailingStops(entryPrice, side, atr)
-					stops = struct{ TP, SL float64 }{tp, sl}
-					trailingStops[symbol] = stops
-					log.Printf("📍 Trailing stop definido: TP %.4f | SL %.4f\n", tp, sl)
-				}
-				if (side == "BUY" && (currentPrice >= stops.TP || currentPrice <= stops.SL)) ||
-					(side == "SELL" && (currentPrice <= stops.TP || currentPrice >= stops.SL)) {
-
-					motivo := "TRAILING TP"
-					if (side == "BUY" && currentPrice <= stops.SL) || (side == "SELL" && currentPrice >= stops.SL) {
-						motivo = "TRAILING SL"
+					trailings[symbol] = &TrailingStatus{
+						Entry:   entryPrice,
+						Side:    side,
+						MaxGain: gain,
 					}
+					continue
+				}
+
+				if gain > trailing.MaxGain {
+					trailing.MaxGain = gain
+				}
+
+				shouldExit := false
+				if gain <= -5.0 {
+					shouldExit = true // Stop loss fixo
+				}
+				if trailing.MaxGain >= 3.0 && gain <= trailing.MaxGain-1.0 {
+					shouldExit = true // Trailing dinâmico de 1%
+				}
+
+				if shouldExit {
 					closeSide := "SELL"
 					if side == "SELL" {
 						closeSide = "BUY"
@@ -170,13 +180,11 @@ func main() {
 						time.Sleep(1 * time.Second)
 						saldoDepois := client.GetUSDTBalance()
 						lucroReal := saldoDepois - saldoAntes
-						msg := fmt.Sprintf("🔴 %s (%s) Fechando %s Qty: %.3f", symbol, motivo, side, qty)
-						msgLucro := fmt.Sprintf("🔎 Lucro real: %.4f USDT (%.2f%%)", lucroReal, pnl)
+						msg := fmt.Sprintf("🔴 %s Fechando %s Qty: %.3f | Gain: %.2f%%", symbol, side, qty, gain)
+						msgLucro := fmt.Sprintf("🔎 Lucro real: %.4f USDT", lucroReal)
 						telegram.SendMessage(msg + "\n" + msgLucro)
-						logger.LogTrade(symbol, motivo+"-CLOSE", qty, currentPrice, saldoDepois)
-						delete(trailingStops, symbol)
-					} else {
-						fmt.Println("❌ Erro ao fechar posição!")
+						logger.LogTrade(symbol, "TRAILING-CLOSE", qty, currentPrice, saldoDepois)
+						delete(trailings, symbol)
 					}
 				}
 				continue
@@ -220,8 +228,6 @@ func main() {
 					saldoDepois)
 				telegram.SendMessage(msgDet)
 				logger.LogTrade(symbol, orderSide, orderQty, currentPrice, saldoDepois)
-			} else {
-				fmt.Println("❌ Erro ao executar ordem!")
 			}
 		}
 		time.Sleep(2 * time.Second)
