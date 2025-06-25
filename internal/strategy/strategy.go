@@ -1,9 +1,6 @@
 package strategy
 
 import (
-	"math"
-	"time"
-
 	"binance-bot/internal/indicators"
 	"binance-bot/internal/types"
 )
@@ -14,9 +11,6 @@ const (
 	NoSignal   = ""
 )
 
-var cooldownMap = make(map[string]int64)
-var cooldownDuration = int64(10 * 60) // 10 minutos em segundos
-
 type Candle struct {
 	Open  float64
 	Close float64
@@ -24,27 +18,9 @@ type Candle struct {
 	Low   float64
 }
 
-func IsStrongCandle(c Candle) bool {
-	rangeSize := c.High - c.Low
-	if rangeSize == 0 {
-		return false
-	}
-	bodySize := math.Abs(c.Close - c.Open)
-	return bodySize/rangeSize >= 0.6
-}
-
-func IsInCooldown(symbol string) bool {
-	now := time.Now().Unix()
-	last := cooldownMap[symbol]
-	return now-last < cooldownDuration
-}
-
-func RegisterCooldown(symbol string) {
-	cooldownMap[symbol] = time.Now().Unix()
-}
-
+// Estratégia agressiva: múltiplas entradas, menos filtros, foco em ganho
 func EvaluateSignal(klines []types.Kline, symbol string) string {
-	if len(klines) < 35 || IsInCooldown(symbol) {
+	if len(klines) < 35 {
 		return NoSignal
 	}
 
@@ -62,38 +38,15 @@ func EvaluateSignal(klines []types.Kline, symbol string) string {
 
 	volMA := indicators.ComputeVolumeMA(volumes, 14)
 	volumeAtual := volumes[len(volumes)-1]
-	volumeOK := volumeAtual > volMA
-
-	atr := indicators.ComputeATR(klines, 14)
-	atrHist := 0.0
-	for i := len(klines) - 15; i < len(klines); i++ {
-		high := klines[i].High
-		low := klines[i].Low
-		closePrev := klines[i-1].Close
-		tr := math.Max(high-low, math.Max(math.Abs(high-closePrev), math.Abs(low-closePrev)))
-		atrHist += tr
-	}
-	atrMedia := atrHist / 14
-	atrOK := atr > atrMedia
-
-	last := klines[len(klines)-1]
-	candle := Candle{
-		Open:  last.Open,
-		Close: last.Close,
-		High:  last.High,
-		Low:   last.Low,
-	}
-	candleOK := IsStrongCandle(candle)
+	volumeOK := volumeAtual >= volMA*0.8
 
 	cruzamentoAlta := macd > signal && macdPrev < signalPrev
 	cruzamentoBaixa := macd < signal && macdPrev > signalPrev
 
-	if cruzamentoAlta && rsi > 50 && rsi < 70 && candleOK && volumeOK && macd > 0 && signal > 0 && atrOK {
-		RegisterCooldown(symbol)
+	if cruzamentoAlta && rsi > 50 && volumeOK {
 		return BuySignal
 	}
-	if cruzamentoBaixa && rsi < 45 && rsi > 30 && candleOK && volumeOK && macd < 0 && signal < 0 && atrOK {
-		RegisterCooldown(symbol)
+	if cruzamentoBaixa && rsi < 50 && volumeOK {
 		return SellSignal
 	}
 	return NoSignal
