@@ -1,4 +1,4 @@
-// main.go com trailing stop móvel atualizado com base no ATR e lucro mínimo de 4%, com SL fixo de -5% e correção de precisão
+// main.go com trailing stop por PnL dinâmico e SL fixo de -5%, com precisão corrigida para ordens
 package main
 
 import (
@@ -23,11 +23,8 @@ import (
 )
 
 type TrailingStatus struct {
-	Entry     float64
-	ATR       float64
-	HighWater float64
-	LowWater  float64
-	Side      string
+	MaxPnL float64
+	Side   string
 }
 
 func countDecimals(step float64) int {
@@ -137,21 +134,21 @@ func main() {
 		for _, symbol := range symbols {
 			stepSize := stepSizes[symbol]
 			rawKlines := client.GetKlines(symbol, "1m", 100)
-			if rawKlines == nil || len(rawKlines) == 0 {
+			if len(rawKlines) == 0 {
 				log.Printf("⚠️ Falha ao obter klines para %s, pulando...", symbol)
 				continue
 			}
+
 			klines := indicators.ConvertToKlines(rawKlines)
 			closes := indicators.ExtractClosePrices(klines)
 			volumes := indicators.ExtractVolumes(klines)
 			macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
 			rsi := indicators.ComputeRSI(closes, 14)
 			volMA := indicators.ComputeVolumeMA(volumes, 14)
-			atr := indicators.ComputeATR(klines, 14)
 			currentPrice := client.GetMarkPrice(symbol)
 
 			sig := strategy.EvaluateSignal(klines, symbol)
-			inPosition, qty, side, entryPrice, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
+			inPosition, qty, side, _, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
 			if err != nil {
 				log.Printf("Erro ao buscar posição para %s: %v\n", symbol, err)
 				continue
@@ -160,31 +157,16 @@ func main() {
 			if inPosition {
 				trailing, exists := trailings[symbol]
 				if !exists {
-					trailings[symbol] = &TrailingStatus{
-						Entry:     entryPrice,
-						ATR:       atr,
-						HighWater: entryPrice,
-						LowWater:  entryPrice,
-						Side:      side,
-					}
+					trailings[symbol] = &TrailingStatus{MaxPnL: pnl, Side: side}
 					continue
 				}
-
-				gain := 100 * math.Abs(currentPrice-entryPrice) / entryPrice
-				if side == "BUY" && currentPrice > trailing.HighWater {
-					trailing.HighWater = currentPrice
-				}
-				if side == "SELL" && currentPrice < trailing.LowWater {
-					trailing.LowWater = currentPrice
+				if pnl > trailing.MaxPnL {
+					trailing.MaxPnL = pnl
 				}
 
 				shouldExit := false
-				if gain >= 3.0 {
-					if side == "BUY" && currentPrice <= trailing.HighWater-(trailing.HighWater*0.01) {
-						shouldExit = true
-					} else if side == "SELL" && currentPrice >= trailing.LowWater+(trailing.LowWater*0.01) {
-						shouldExit = true
-					}
+				if trailing.MaxPnL >= 3.0 && pnl <= trailing.MaxPnL-1.0 {
+					shouldExit = true
 				}
 				if pnl <= -5.0 {
 					shouldExit = true
@@ -192,7 +174,7 @@ func main() {
 
 				if shouldExit {
 					closeSide := "SELL"
-					if side == "SELL" {
+					if trailing.Side == "SELL" {
 						closeSide = "BUY"
 					}
 					if qty < stepSize {
@@ -205,7 +187,7 @@ func main() {
 						time.Sleep(1 * time.Second)
 						saldoDepois := client.GetUSDTBalance()
 						lucroReal := saldoDepois - saldoAntes
-						msg := fmt.Sprintf("🔴 %s (Gain %.2f%% | PnL %.2f%%) Fechando %s Qty: %.3f", symbol, gain, pnl, side, qty)
+						msg := fmt.Sprintf("🔴 %s (MaxPnL %.2f%% → %.2f%%) Fechando %s Qty: %.3f", symbol, trailing.MaxPnL, pnl, trailing.Side, qty)
 						msgLucro := fmt.Sprintf("🔎 Lucro real: %.4f USDT", lucroReal)
 						telegram.SendMessage(msg + "\n" + msgLucro)
 						logger.LogTrade(symbol, "TRAILING-CLOSE", qty, currentPrice, saldoDepois)
