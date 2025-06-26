@@ -1,4 +1,4 @@
-// main.go com trailing stop dinâmico (1%) e stop loss ampliado para -5%
+// main.go com trailing stop móvel atualizado com base no ATR e lucro mínimo de 4%, com SL fixo de -5% e correção de precisão
 package main
 
 import (
@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -22,9 +23,18 @@ import (
 )
 
 type TrailingStatus struct {
-	Entry   float64
-	Side    string
-	MaxGain float64
+	Entry     float64
+	ATR       float64
+	HighWater float64
+	LowWater  float64
+	Side      string
+}
+
+func countDecimals(step float64) int {
+	str := fmt.Sprintf("%f", step)
+	parts := strings.Split(str, ".")
+	decimals := strings.TrimRight(parts[1], "0")
+	return len(decimals)
 }
 
 func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, float64, string, float64, float64, error) {
@@ -127,16 +137,21 @@ func main() {
 		for _, symbol := range symbols {
 			stepSize := stepSizes[symbol]
 			rawKlines := client.GetKlines(symbol, "1m", 100)
+			if rawKlines == nil || len(rawKlines) == 0 {
+				log.Printf("⚠️ Falha ao obter klines para %s, pulando...", symbol)
+				continue
+			}
 			klines := indicators.ConvertToKlines(rawKlines)
 			closes := indicators.ExtractClosePrices(klines)
 			volumes := indicators.ExtractVolumes(klines)
 			macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
 			rsi := indicators.ComputeRSI(closes, 14)
 			volMA := indicators.ComputeVolumeMA(volumes, 14)
+			atr := indicators.ComputeATR(klines, 14)
 			currentPrice := client.GetMarkPrice(symbol)
 
 			sig := strategy.EvaluateSignal(klines, symbol)
-			inPosition, qty, side, entryPrice, gain, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
+			inPosition, qty, side, entryPrice, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
 			if err != nil {
 				log.Printf("Erro ao buscar posição para %s: %v\n", symbol, err)
 				continue
@@ -146,23 +161,33 @@ func main() {
 				trailing, exists := trailings[symbol]
 				if !exists {
 					trailings[symbol] = &TrailingStatus{
-						Entry:   entryPrice,
-						Side:    side,
-						MaxGain: gain,
+						Entry:     entryPrice,
+						ATR:       atr,
+						HighWater: entryPrice,
+						LowWater:  entryPrice,
+						Side:      side,
 					}
 					continue
 				}
 
-				if gain > trailing.MaxGain {
-					trailing.MaxGain = gain
+				gain := 100 * math.Abs(currentPrice-entryPrice) / entryPrice
+				if side == "BUY" && currentPrice > trailing.HighWater {
+					trailing.HighWater = currentPrice
+				}
+				if side == "SELL" && currentPrice < trailing.LowWater {
+					trailing.LowWater = currentPrice
 				}
 
 				shouldExit := false
-				if gain <= -5.0 {
-					shouldExit = true // Stop loss fixo
+				if gain >= 3.0 {
+					if side == "BUY" && currentPrice <= trailing.HighWater-(trailing.HighWater*0.01) {
+						shouldExit = true
+					} else if side == "SELL" && currentPrice >= trailing.LowWater+(trailing.LowWater*0.01) {
+						shouldExit = true
+					}
 				}
-				if trailing.MaxGain >= 3.0 && gain <= trailing.MaxGain-1.0 {
-					shouldExit = true // Trailing dinâmico de 1%
+				if pnl <= -5.0 {
+					shouldExit = true
 				}
 
 				if shouldExit {
@@ -180,7 +205,7 @@ func main() {
 						time.Sleep(1 * time.Second)
 						saldoDepois := client.GetUSDTBalance()
 						lucroReal := saldoDepois - saldoAntes
-						msg := fmt.Sprintf("🔴 %s Fechando %s Qty: %.3f | Gain: %.2f%%", symbol, side, qty, gain)
+						msg := fmt.Sprintf("🔴 %s (Gain %.2f%% | PnL %.2f%%) Fechando %s Qty: %.3f", symbol, gain, pnl, side, qty)
 						msgLucro := fmt.Sprintf("🔎 Lucro real: %.4f USDT", lucroReal)
 						telegram.SendMessage(msg + "\n" + msgLucro)
 						logger.LogTrade(symbol, "TRAILING-CLOSE", qty, currentPrice, saldoDepois)
@@ -195,7 +220,10 @@ func main() {
 				log.Printf("❌ Quantidade insuficiente para %s (min: %.4f)", symbol, stepSize)
 				continue
 			}
-			orderQty := math.Floor(rawQty/stepSize) * stepSize
+			decimals := countDecimals(stepSize)
+			factor := math.Pow(10, float64(decimals))
+			orderQty := math.Floor(rawQty*factor) / factor
+
 			var orderSide string
 			switch sig {
 			case strategy.BuySignal:
