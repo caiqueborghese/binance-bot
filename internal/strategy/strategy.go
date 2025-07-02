@@ -5,62 +5,59 @@ import (
 	"binance-bot/internal/types"
 )
 
+type Signal int
+
 const (
-	BuySignal  = "BUY"
-	SellSignal = "SELL"
-	NoSignal   = ""
+	NoSignal Signal = iota
+	BuySignal
+	SellSignal
 )
 
-type Candle struct {
-	Open  float64
-	Close float64
-	High  float64
-	Low   float64
-}
+func EvaluateSignal(klines []types.Kline, symbol string) Signal {
+	closes := indicators.ExtractClosePrices(klines)
+	volumes := indicators.ExtractVolumes(klines)
+	macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
+	rsi := indicators.ComputeRSI(closes, 14)
+	volumeMA := indicators.ComputeVolumeMA(volumes, 20)
 
-// Estratégia agressiva: múltiplas entradas, menos filtros, foco em ganho
-func EvaluateSignal(klines []types.Kline, symbol string) string {
-	if len(klines) < 35 {
+	if len(closes) < 6 || len(macdLine) < 2 || len(signalLine) < 2 || len(rsi) < 1 {
 		return NoSignal
 	}
 
-	closes := indicators.ExtractClosePrices(klines)
-	volumes := indicators.ExtractVolumes(klines)
-
-	macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
-	macd := macdLine[len(macdLine)-1]
+	latestClose := closes[len(closes)-1]
+	latestVolume := volumes[len(volumes)-1]
+	latestRSI := rsi[len(rsi)-1]
 	macdPrev := macdLine[len(macdLine)-2]
-	signal := signalLine[len(signalLine)-1]
+	macdCurr := macdLine[len(macdLine)-1]
 	signalPrev := signalLine[len(signalLine)-2]
+	signalCurr := signalLine[len(signalLine)-1]
 
-	rsiValues := indicators.ComputeRSI(closes, 14)
-	rsi := rsiValues[len(rsiValues)-1]
+	high5 := klines[len(klines)-6].High
+	low5 := klines[len(klines)-6].Low
+	for i := len(klines) - 6; i < len(klines)-1; i++ {
+		if klines[i].High > high5 {
+			high5 = klines[i].High
+		}
+		if klines[i].Low < low5 {
+			low5 = klines[i].Low
+		}
+	}
 
-	volMA := indicators.ComputeVolumeMA(volumes, 14)
-	volumeAtual := volumes[len(volumes)-1]
-	volumeOK := volumeAtual >= volMA*0.8
-
-	cruzamentoAlta := macd > signal && macdPrev < signalPrev
-	cruzamentoBaixa := macd < signal && macdPrev > signalPrev
-
-	if cruzamentoAlta && rsi > 50 && volumeOK {
+	// BUY condition
+	if latestRSI > 60 &&
+		macdPrev < signalPrev && macdCurr > signalCurr &&
+		latestVolume > 1.5*volumeMA &&
+		latestClose > high5 {
 		return BuySignal
 	}
-	if cruzamentoBaixa && rsi < 50 && volumeOK {
+
+	// SELL condition
+	if latestRSI < 40 &&
+		macdPrev > signalPrev && macdCurr < signalCurr &&
+		latestVolume > 1.5*volumeMA &&
+		latestClose < low5 {
 		return SellSignal
 	}
-	return NoSignal
-}
 
-func ComputeTrailingStops(entry float64, side string, atr float64) (takeProfit, stopLoss float64) {
-	multTP := 2.5
-	multSL := 1.5
-	if side == BuySignal {
-		takeProfit = entry + (atr * multTP)
-		stopLoss = entry - (atr * multSL)
-	} else {
-		takeProfit = entry - (atr * multTP)
-		stopLoss = entry + (atr * multSL)
-	}
-	return
+	return NoSignal
 }
