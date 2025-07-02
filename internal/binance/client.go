@@ -1,16 +1,14 @@
 package binance
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"math"
 	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 
@@ -24,171 +22,134 @@ type BinanceRestClient struct {
 }
 
 func NewBinanceRestClient(cfg config.Config) *BinanceRestClient {
+	base := "https://fapi.binance.com"
+	if cfg.Testnet {
+		base = "https://testnet.binancefuture.com"
+	}
 	return &BinanceRestClient{
 		APIKey:    cfg.APIKey,
 		APISecret: cfg.APISecret,
-		BaseURL:   "https://fapi.binance.com",
+		BaseURL:   base,
 	}
 }
 
-func (c *BinanceRestClient) sign(data string) string {
-	h := hmac.New(sha256.New, []byte(c.APISecret))
-	h.Write([]byte(data))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func (c *BinanceRestClient) GetUSDTBalance() float64 {
-	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	rw := "5000"
-	params := url.Values{}
-	params.Set("timestamp", ts)
-	params.Set("recvWindow", rw)
-	q := params.Encode()
-	sig := c.sign(q)
-	url := fmt.Sprintf("%s/fapi/v2/balance?%s&signature=%s", c.BaseURL, q, sig)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		log.Fatalf("Error creating balance request: %v", err)
-	}
-	req.Header.Set("X-MBX-APIKEY", c.APIKey)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Fatalf("Error fetching balance: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := ioutil.ReadAll(resp.Body)
-	var arr []struct{ Asset, Balance string }
-	if err := json.Unmarshal(body, &arr); err != nil {
-		log.Fatalf("Error parsing balance JSON: %v", err)
-	}
-	for _, a := range arr {
-		if a.Asset == "USDT" {
-			v, _ := strconv.ParseFloat(a.Balance, 64)
-			return v
-		}
-	}
-	return 0.0
-}
-
-func roundQuantity(qty, stepSize float64) float64 {
-	return math.Floor(qty/stepSize) * stepSize
-}
-
-func (c *BinanceRestClient) PlaceMarketOrder(symbol, side string, quantity float64, reduceOnly bool) bool {
-	stepSizes := map[string]float64{
-		"BTCUSDT": 0.001,
-		"ETHUSDT": 0.01,
-		"XRPUSDT": 0.1,
-	}
-	stepSize, ok := stepSizes[symbol]
-	if !ok {
-		stepSize = 0.001
-		log.Printf("⚠️ Usando stepSize padrão para %s: %.4f", symbol, stepSize)
-	}
-
-	qty := math.Floor(quantity/stepSize) * stepSize
-	if qty <= 0 {
-		log.Printf("❌ Quantity %.6f abaixo do stepSize %.6f", quantity, stepSize)
-		return false
-	}
-
-	precision := int(math.Round(-math.Log10(stepSize)))
-	if precision < 0 {
-		precision = 0
-	}
-
-	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	rw := "5000"
-	params := url.Values{}
-	params.Set("symbol", symbol)
-	params.Set("side", side)
-	params.Set("type", "MARKET")
-	params.Set("quantity", fmt.Sprintf("%.*f", precision, qty))
-	params.Set("timestamp", ts)
-	params.Set("recvWindow", rw)
-	params.Set("newOrderRespType", "RESULT")
-
-	if reduceOnly {
-		params.Set("reduceOnly", "true")
-		log.Printf("🔁 Enviando ordem para fechar posição (reduceOnly)")
-	}
-
-	q := params.Encode()
-	sig := c.sign(q)
-	url := fmt.Sprintf("%s/fapi/v1/order?%s&signature=%s", c.BaseURL, q, sig)
-
-	req, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		log.Printf("❌ Erro criando request: %v", err)
-		return false
-	}
-	req.Header.Set("X-MBX-APIKEY", c.APIKey)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Printf("❌ Erro enviando ordem: %v", err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	body, _ := ioutil.ReadAll(resp.Body)
-	log.Printf("📨 Order response: %s", string(body))
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("❌ Erro ao decodificar resposta: %v", err)
-		return false
-	}
-
-	if code, ok := result["code"].(float64); ok && code != 0 {
-		log.Printf("❌ Erro da Binance: code %.0f, msg: %s", code, result["msg"])
-		return false
-	}
-
-	log.Printf("✅ Ordem executada com sucesso! Symbol: %s, Side: %s, Qty: %.4f", symbol, side, qty)
-	return true
-}
-
-func (c *BinanceRestClient) GetKlines(symbol, interval string, limit int) [][]interface{} {
-	endpoint := fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", c.BaseURL, symbol, interval, limit)
-	resp, err := http.Get(endpoint)
-	if err != nil {
-		log.Fatalf("Error fetching klines: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := ioutil.ReadAll(resp.Body)
-	var klines [][]interface{}
-	if err := json.Unmarshal(body, &klines); err != nil {
-		log.Fatalf("Error parsing klines JSON: %v", err)
-	}
-	return klines
-}
-
-func (c *BinanceRestClient) GetMarkPrice(symbol string) float64 {
-	endpoint := fmt.Sprintf("%s/fapi/v1/premiumIndex?symbol=%s", c.BaseURL, symbol)
-	resp, err := http.Get(endpoint)
-	if err != nil {
-		log.Printf("❌ Erro ao buscar mark price: %v", err)
-		return 0.0
-	}
-	defer resp.Body.Close()
-	body, _ := ioutil.ReadAll(resp.Body)
-
-	var data struct {
-		MarkPrice string `json:"markPrice"`
-	}
-	if err := json.Unmarshal(body, &data); err != nil {
-		log.Printf("❌ Erro ao decodificar mark price: %v", err)
-		return 0.0
-	}
-	price, _ := strconv.ParseFloat(data.MarkPrice, 64)
-	return price
-}
-
-// ✅ Função auxiliar de assinatura para posição
 func Sign(data, secret string) string {
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write([]byte(data))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+type OrderRequest struct {
+	Symbol      string `json:"symbol"`
+	Side        string `json:"side"`
+	Type        string `json:"type"`
+	Quantity    string `json:"quantity"`
+	RecvWindow  int    `json:"recvWindow"`
+	Timestamp   int64  `json:"timestamp"`
+	ReduceOnly  bool   `json:"reduceOnly,omitempty"`
+	NewClientID string `json:"newClientOrderId,omitempty"`
+}
+
+func (b *BinanceRestClient) PlaceMarketOrder(symbol, side string, quantity float64, reduceOnly bool) bool {
+	endpoint := "/fapi/v1/order"
+	url := b.BaseURL + endpoint
+
+	quantityStr := strconv.FormatFloat(quantity, 'f', -1, 64)
+	order := OrderRequest{
+		Symbol:     symbol,
+		Side:       side,
+		Type:       "MARKET",
+		Quantity:   quantityStr,
+		RecvWindow: 5000,
+		Timestamp:  time.Now().UnixMilli(),
+		ReduceOnly: reduceOnly,
+	}
+
+	body, _ := json.Marshal(order)
+	params := fmt.Sprintf("symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=5000&timestamp=%d",
+		symbol, side, quantityStr, order.Timestamp)
+	if reduceOnly {
+		params += "&reduceOnly=true"
+	}
+	signature := Sign(params, b.APISecret)
+	req, err := http.NewRequest("POST", url+"?"+params+"&signature="+signature, bytes.NewBuffer(body))
+	if err != nil {
+		log.Println("Erro ao criar requisição:", err)
+		return false
+	}
+	req.Header.Set("X-MBX-APIKEY", b.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Println("Erro ao enviar requisição:", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if code, ok := result["code"]; ok {
+		log.Printf("📨 Order response: %+v", result)
+		log.Printf("❌ Erro da Binance: code %v, msg: %v", code, result["msg"])
+		return false
+	}
+	log.Printf("📨 Ordem executada com sucesso: %+v", result)
+	return true
+}
+
+func (b *BinanceRestClient) GetUSDTBalance() float64 {
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	params := "timestamp=" + timestamp
+	signature := Sign(params, b.APISecret)
+	url := b.BaseURL + "/fapi/v2/account?" + params + "&signature=" + signature
+
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("X-MBX-APIKEY", b.APIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Println("Erro ao obter saldo:", err)
+		return 0.0
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if available, ok := result["availableBalance"].(string); ok {
+		balance, _ := strconv.ParseFloat(available, 64)
+		return balance
+	}
+	return 0.0
+}
+
+func (b *BinanceRestClient) GetMarkPrice(symbol string) float64 {
+	url := b.BaseURL + "/fapi/v1/premiumIndex?symbol=" + symbol
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Println("Erro ao obter mark price:", err)
+		return 0.0
+	}
+	defer resp.Body.Close()
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	price, _ := strconv.ParseFloat(result["markPrice"].(string), 64)
+	return price
+}
+
+func (b *BinanceRestClient) GetKlines(symbol, interval string, limit int) [][]interface{} {
+	url := fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", b.BaseURL, symbol, interval, limit)
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Println("Erro ao obter klines:", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var klines [][]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&klines); err != nil {
+		log.Println("Error parsing klines JSON:", err)
+		return nil
+	}
+	return klines
 }
