@@ -34,8 +34,8 @@ func countDecimals(step float64) int {
 	return len(decimals)
 }
 
-func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, float64, string, float64, float64, error) {
-	markPriceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
+func getPositionInfo(client *binance.BinanceRestClient, symbol string, leverage float64) (bool, float64, string, float64, float64, error) {
+	markPriceURL := fmt.Sprintf("%s/fapi/v1/premiumIndex?symbol=%s", client.BaseURL, symbol)
 	resp, err := http.Get(markPriceURL)
 	if err != nil {
 		return false, 0, "", 0, 0, fmt.Errorf("erro ao obter mark price: %v", err)
@@ -51,38 +51,44 @@ func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, 
 
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params := "timestamp=" + timestamp
-	signature := binance.Sign(params, apiSecret)
-	url := fmt.Sprintf("https://fapi.binance.com/fapi/v2/positionRisk?%s&signature=%s", params, signature)
+	signature := binance.Sign(params, client.APISecret)
+	url := fmt.Sprintf("%s/fapi/v2/positionRisk?%s&signature=%s", client.BaseURL, params, signature)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return false, 0, "", 0, 0, err
 	}
-	req.Header.Set("X-MBX-APIKEY", apiKey)
+	req.Header.Set("X-MBX-APIKEY", client.APIKey)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		return false, 0, "", 0, 0, err
 	}
 	defer resp.Body.Close()
 
-	var data []map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	var raw interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return false, 0, "", 0, 0, err
 	}
+	slice, ok := raw.([]interface{})
+	if !ok {
+		log.Println("⚠️ Resposta inesperada da Binance:", raw)
+		return false, 0, "", 0, 0, fmt.Errorf("formato inválido da resposta da Binance")
+	}
 
-	for _, item := range data {
-		if item["symbol"] == symbol {
-			posAmt, _ := strconv.ParseFloat(item["positionAmt"].(string), 64)
+	for _, item := range slice {
+		entry := item.(map[string]interface{})
+		if entry["symbol"] == symbol {
+			posAmt, _ := strconv.ParseFloat(entry["positionAmt"].(string), 64)
 			if posAmt == 0 {
 				return false, 0, "", 0, 0, nil
 			}
-			entry, _ := strconv.ParseFloat(item["entryPrice"].(string), 64)
+			entryPrice, _ := strconv.ParseFloat(entry["entryPrice"].(string), 64)
 
 			var pnl float64
 			if posAmt > 0 {
-				pnl = (markPrice - entry) / entry * leverage * 100
+				pnl = (markPrice - entryPrice) / entryPrice * leverage * 100
 			} else {
-				pnl = (entry - markPrice) / entry * leverage * 100
+				pnl = (entryPrice - markPrice) / entryPrice * leverage * 100
 			}
 
 			side := "BUY"
@@ -91,9 +97,9 @@ func getPositionInfo(apiKey, apiSecret, symbol string, leverage float64) (bool, 
 			}
 
 			log.Printf("🔍 Position Debug | %s | Qty: %.2f | Entry: %.4f | Mark: %.4f | PnL: %.2f%%",
-				side, math.Abs(posAmt), entry, markPrice, pnl)
+				side, math.Abs(posAmt), entryPrice, markPrice, pnl)
 
-			return true, math.Abs(posAmt), side, entry, pnl, nil
+			return true, math.Abs(posAmt), side, entryPrice, pnl, nil
 		}
 	}
 	return false, 0, "", 0, 0, nil
@@ -113,7 +119,7 @@ func main() {
 	cfg := config.Config{
 		APIKey:    apiKey,
 		APISecret: apiSecret,
-		Testnet:   false,
+		Testnet:   true,
 	}
 	client := binance.NewBinanceRestClient(cfg)
 
@@ -134,11 +140,10 @@ func main() {
 		for _, symbol := range symbols {
 			stepSize := stepSizes[symbol]
 			rawKlines := client.GetKlines(symbol, "1m", 100)
-			if len(rawKlines) == 0 {
+			if rawKlines == nil || len(rawKlines) == 0 {
 				log.Printf("⚠️ Falha ao obter klines para %s, pulando...", symbol)
 				continue
 			}
-
 			klines := indicators.ConvertToKlines(rawKlines)
 			closes := indicators.ExtractClosePrices(klines)
 			volumes := indicators.ExtractVolumes(klines)
@@ -148,7 +153,8 @@ func main() {
 			currentPrice := client.GetMarkPrice(symbol)
 
 			sig := strategy.EvaluateSignal(klines, symbol)
-			inPosition, qty, side, _, pnl, err := getPositionInfo(apiKey, apiSecret, symbol, leverage)
+			inPosition, qty, side, _, pnl, err := getPositionInfo(client, symbol, leverage)
+
 			if err != nil {
 				log.Printf("Erro ao buscar posição para %s: %v\n", symbol, err)
 				continue
