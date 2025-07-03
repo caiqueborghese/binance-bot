@@ -5,58 +5,43 @@ import (
 	"binance-bot/internal/types"
 )
 
-type Signal int
-
+// Sinais possíveis
 const (
-	NoSignal Signal = iota
+	NoSignal = iota
 	BuySignal
 	SellSignal
 )
 
-func EvaluateSignal(klines []types.Kline, symbol string) Signal {
-	closes := indicators.ExtractClosePrices(klines)
-	volumes := indicators.ExtractVolumes(klines)
-	macdLine, signalLine, _ := indicators.ComputeMACD(closes, 12, 26, 9)
-	rsi := indicators.ComputeRSI(closes, 14)
-	volumeMA := indicators.ComputeVolumeMA(volumes, 20)
-
-	if len(closes) < 6 || len(macdLine) < 2 || len(signalLine) < 2 || len(rsi) < 1 {
+// EvaluateSignal aplica uma estratégia agressiva e altamente assertiva
+func EvaluateSignal(klines []types.Kline, symbol string) int {
+	if len(klines) < 35 {
 		return NoSignal
 	}
 
-	latestClose := closes[len(closes)-1]
-	latestVolume := volumes[len(volumes)-1]
-	latestRSI := rsi[len(rsi)-1]
-	macdPrev := macdLine[len(macdLine)-2]
-	macdCurr := macdLine[len(macdLine)-1]
-	signalPrev := signalLine[len(signalLine)-2]
-	signalCurr := signalLine[len(signalLine)-1]
+	closes := indicators.ExtractClosePrices(klines)
+	volumes := indicators.ExtractVolumes(klines)
 
-	high5 := klines[len(klines)-6].High
-	low5 := klines[len(klines)-6].Low
-	for i := len(klines) - 6; i < len(klines)-1; i++ {
-		if klines[i].High > high5 {
-			high5 = klines[i].High
+	rsi := indicators.ComputeRSI(closes, 14)
+	macd, signal, hist := indicators.ComputeMACD(closes, 12, 26, 9)
+	volMA := indicators.ComputeVolumeMA(volumes, 10)
+
+	if len(rsi) >= 2 && len(hist) >= 3 && len(macd) >= 2 && len(signal) >= 2 {
+		rsi1 := rsi[len(rsi)-2]
+		rsi2 := rsi[len(rsi)-1]
+		hist1 := hist[len(hist)-3]
+		hist2 := hist[len(hist)-2]
+		hist3 := hist[len(hist)-1]
+		vol := volumes[len(volumes)-1]
+
+		// BUY
+		if rsi1 < 50 && rsi2 > 50 && hist1 < hist2 && hist2 < hist3 && vol > volMA {
+			return BuySignal
 		}
-		if klines[i].Low < low5 {
-			low5 = klines[i].Low
+
+		// SELL
+		if rsi1 > 50 && rsi2 < 50 && hist1 > hist2 && hist2 > hist3 && vol > volMA {
+			return SellSignal
 		}
-	}
-
-	// BUY condition
-	if latestRSI > 60 &&
-		macdPrev < signalPrev && macdCurr > signalCurr &&
-		latestVolume > 1.5*volumeMA &&
-		latestClose > high5 {
-		return BuySignal
-	}
-
-	// SELL condition
-	if latestRSI < 40 &&
-		macdPrev > signalPrev && macdCurr < signalCurr &&
-		latestVolume > 1.5*volumeMA &&
-		latestClose < low5 {
-		return SellSignal
 	}
 
 	return NoSignal
