@@ -1,15 +1,17 @@
 package binance
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"binance-bot/config"
@@ -39,46 +41,32 @@ func Sign(data, secret string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-type OrderRequest struct {
-	Symbol      string `json:"symbol"`
-	Side        string `json:"side"`
-	Type        string `json:"type"`
-	Quantity    string `json:"quantity"`
-	RecvWindow  int    `json:"recvWindow"`
-	Timestamp   int64  `json:"timestamp"`
-	ReduceOnly  bool   `json:"reduceOnly,omitempty"`
-	NewClientID string `json:"newClientOrderId,omitempty"`
-}
-
 func (b *BinanceRestClient) PlaceMarketOrder(symbol, side string, quantity float64, reduceOnly bool) bool {
 	endpoint := "/fapi/v1/order"
-	url := b.BaseURL + endpoint
-
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	quantityStr := strconv.FormatFloat(quantity, 'f', -1, 64)
-	order := OrderRequest{
-		Symbol:     symbol,
-		Side:       side,
-		Type:       "MARKET",
-		Quantity:   quantityStr,
-		RecvWindow: 5000,
-		Timestamp:  time.Now().UnixMilli(),
-		ReduceOnly: reduceOnly,
+
+	params := url.Values{}
+	params.Add("symbol", symbol)
+	params.Add("side", side)
+	params.Add("type", "MARKET")
+	params.Add("quantity", quantityStr)
+	params.Add("recvWindow", "5000")
+	params.Add("timestamp", timestamp)
+	if reduceOnly {
+		params.Add("reduceOnly", "true")
 	}
 
-	body, _ := json.Marshal(order)
-	params := fmt.Sprintf("symbol=%s&side=%s&type=MARKET&quantity=%s&recvWindow=5000&timestamp=%d",
-		symbol, side, quantityStr, order.Timestamp)
-	if reduceOnly {
-		params += "&reduceOnly=true"
-	}
-	signature := Sign(params, b.APISecret)
-	req, err := http.NewRequest("POST", url+"?"+params+"&signature="+signature, bytes.NewBuffer(body))
+	signature := Sign(params.Encode(), b.APISecret)
+	params.Add("signature", signature)
+
+	req, err := http.NewRequest("POST", b.BaseURL+endpoint, strings.NewReader(params.Encode()))
 	if err != nil {
 		log.Println("Erro ao criar requisição:", err)
 		return false
 	}
 	req.Header.Set("X-MBX-APIKEY", b.APIKey)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -87,8 +75,10 @@ func (b *BinanceRestClient) PlaceMarketOrder(symbol, side string, quantity float
 	}
 	defer resp.Body.Close()
 
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
+	json.Unmarshal(bodyBytes, &result)
+
 	if code, ok := result["code"]; ok {
 		log.Printf("📨 Order response: %+v", result)
 		log.Printf("❌ Erro da Binance: code %v, msg: %v", code, result["msg"])
